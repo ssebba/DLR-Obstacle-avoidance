@@ -1,0 +1,14 @@
+.venv/
+build/
+install/
+log/
+.vscode/
+src/lab03_pkg/
+src/lab04_pkg/
+src/lab05_pkg/
+src/py_srvcli/
+src/ros_tutorials/
+src/turtlebot3_perception/
+models/
+__pycache__/
+*.pyc
