@@ -18,5 +18,9 @@ source ~/ros_ws/install/setup.bash
 
 pip install -r requirements.txt
 
+# 3) Add in .venv/bin/activate file these lines
 
+export PYTHONPATH=$PYTHONPATH:/opt/ros/humble/lib/python3.10/site-packages
+export PYTHONPATH="$VIRTUAL_ENV/lib/python3.10/site-packages:$PYTHONPATH"
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
