@@ -1,0 +1,12 @@
+tensorflow==2.15.0
+keras==2.15.0
+numpy==1.26.4
+scipy==1.15.3
+opencv-python==4.8.1.78
+matplotlib==3.10.9
+pillow==12.2.0
+protobuf==4.25.9
+ml-dtypes==0.2.0
+tf-transformations==1.1.1
+h5py==3.14.0
+requests==2.33.1

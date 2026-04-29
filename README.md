@@ -1,12 +1,15 @@
 # 1) Generate the virtual environment:
 
 python3 -m venv .
-# (Probably you'll have to install venv)
+(Probably you'll have to install venv)
 
 # 2) source the virtual environment, you should see .veng before user@PC:~/ros_ws
 source .venv/bin/activate 
-# the source can be added to the .bashrc file
-# the .bashrc has to be like this:
+
+the source can be added to the .bashrc file
+
+the .bashrc has to be like this:
+
 source /opt/ros/humble/setup.bash
 source /usr/share/gazebo/setup.bash
 source ~/ros_ws/.venv/bin/activate
