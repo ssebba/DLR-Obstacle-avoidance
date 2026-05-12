@@ -27,7 +27,7 @@ class Controller(Node):
         super().__init__('controller')
         
         # Node parameters
-        self.declare_parameter('control_frequency', 5) 
+        self.declare_parameter('control_frequency', 10) 
         self.declare_parameter('collision_tol', 0.20)  # 15-25 cm
         self.declare_parameter('linear_velocity',0.2) # define constant linear speed
 
@@ -58,14 +58,14 @@ class Controller(Node):
         )
 
         # Timer for the control loop
-        self.timer = self.create_timer(self.control_freq, self.control_loop_callback)
+        self.timer = self.create_timer(1/self.control_freq, self.control_loop_callback)
         
         # Metrics and state
         self.step_count = 0
         self.feedback_rate = 50
 
         # load trained model
-        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/dummy_model.h5')
+        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/trained_model_FINAL.h5')
 
         self.navigation_active = True
         self.stop_flag = False

@@ -59,28 +59,6 @@
       <real_time>1607 284133850</real_time>
       <wall_time>1778142516 606251905</wall_time>
       <iterations>1547659</iterations>
-      <model name='turtlebot3_burger'>
-        <pose>0.008512 -0.000419 -8778.51 0.001653 8.8e-05 0.001325</pose>
-        <scale>1 1 1</scale>
-        <link name='base_footprint'>
-          <pose>0.008512 -0.000419 -8778.51 0.001653 8.8e-05 0.001325</pose>
-          <velocity>-0 1e-06 -414.795 4e-05 -0.00018 1.8e-05</velocity>
-          <acceleration>0 0 -9.8 -0 -0 -0</acceleration>
-          <wrench>0 0 -9.2584 0 -0 0</wrench>
-        </link>
-        <link name='wheel_left_link'>
-          <pose>0.008409 0.079526 -8778.48 -1.56835 -0.034993 0.001239</pose>
-          <velocity>-7e-06 -0 -414.795 4e-05 -0.00018 1.8e-05</velocity>
-          <acceleration>-0 -0 -9.8 0 -0 0</acceleration>
-          <wrench>-0 -0 -0.279289 0 -0 0</wrench>
-        </link>
-        <link name='wheel_right_link'>
-          <pose>0.008621 -0.080474 -8778.48 -1.56835 0.033902 0.001408</pose>
-          <velocity>-4e-06 -0 -414.795 4e-05 -0.00018 1.8e-05</velocity>
-          <acceleration>0 0 -9.8 0 -0 0</acceleration>
-          <wrench>0 0 -0.279289 0 -0 0</wrench>
-        </link>
-      </model>
       <model name='world5'>
         <pose>0.637567 -1.60778 0 0 -0 0</pose>
         <scale>1 1 1</scale>

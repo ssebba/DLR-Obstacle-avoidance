@@ -35,7 +35,8 @@ class lidar_filter(Node):
         ranges = np.array(lidar_scan.ranges)
         
         # 1. Remove NaN e Inf
-        ranges[np.isnan(ranges)] = lidar_scan.range_min if lidar_scan.range_min > 0 else 0.01 # Assegna max per NaN  (prima era scan.range_max)
+        #ranges[np.isnan(ranges)] = lidar_scan.range_min if lidar_scan.range_min > 0 else 0.01 # Assegna max per NaN  (prima era scan.range_max)
+        ranges[np.isnan(ranges)] = lidar_scan.range_max
         ranges[np.isinf(ranges)] = lidar_scan.range_max  # Assegna max per Inf
         
         # 2. Limit to max_range

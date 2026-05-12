@@ -55,17 +55,29 @@ class Respawner(Node):
             clean_content = world_content.replace('ignition::', 'ignition_')
             root = ET.fromstring(clean_content)
 
+            # First extract global offsets from the <state> section
+            model_offsets = {}
+            for state_model in root.findall('.//state/model'):
+                name = state_model.get('name')
+                pose_tag = state_model.find('pose')
+                if pose_tag is not None:
+                    mp_vals = [float(v) for v in pose_tag.text.split()]
+                    model_offsets[name] = (mp_vals[0], mp_vals[1], mp_vals[5])
+
             for model in root.findall('.//model'):
                 model_name = model.get('name')
                 if model_name in ['ground_plane', 'turtlebot3_burger']:
                     continue
 
-                # Read model global offset
-                model_pose_tag = model.find('pose')
+                # Read model global offset: prefer state offset, fallback to model pose
                 mx, my, myaw = 0.0, 0.0, 0.0
-                if model_pose_tag is not None:
-                    mp_vals = [float(v) for v in model_pose_tag.text.split()]
-                    mx, my, myaw = mp_vals[0], mp_vals[1], mp_vals[5]
+                if model_name in model_offsets:
+                    mx, my, myaw = model_offsets[model_name]
+                else:
+                    model_pose_tag = model.find('pose')
+                    if model_pose_tag is not None:
+                        mp_vals = [float(v) for v in model_pose_tag.text.split()]
+                        mx, my, myaw = mp_vals[0], mp_vals[1], mp_vals[5]
 
                 for link in model.findall('.//link'):
                     pose_tag = link.find('pose')
@@ -98,11 +110,18 @@ class Respawner(Node):
     def yaw_to_quaternion(self, yaw):
         return 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
-    def get_random_safe_pose(self, margin=0.6):
+    def get_random_safe_pose(self, margin=0.6, forward_clearance=0.55):
         min_x = self.map_min_x + margin
         max_x = self.map_max_x - margin
         min_y = self.map_min_y + margin
         max_y = self.map_max_y - margin
+
+        # Creiamo degli step per controllare lo spazio davanti al robot.
+        # Controllare solo la fine del segmento (0.55) potrebbe farci saltare
+        # muri molto sottili che si trovano in mezzo.
+        steps = 5
+        check_distances = [forward_clearance * (i / steps) for i in range(steps + 1)]
+        # Questo genererà distanze: [0.0, 0.11, 0.22, 0.33, 0.44, 0.55]
 
         while True:
             px = random.uniform(min_x, max_x)
@@ -110,15 +129,34 @@ class Respawner(Node):
             yaw = random.uniform(-math.pi, math.pi)
 
             is_safe = True
-            for (wx, wy, sx, sy) in self.map_obstacles:
-                w_min_x = wx - (sx / 2.0) - margin
-                w_max_x = wx + (sx / 2.0) + margin
-                w_min_y = wy - (sy / 2.0) - margin
-                w_max_y = wy + (sy / 2.0) + margin
+            
+            # Controlliamo il centro del robot e i punti di fronte a lui
+            for d in check_distances:
+                # Calcoliamo il punto "d" metri davanti al robot
+                check_x = px + d * math.cos(yaw)
+                check_y = py + d * math.sin(yaw)
 
-                if (w_min_x < px < w_max_x) and (w_min_y < py < w_max_y):
+                # 1. Verifica che lo spazio davanti non esca dai limiti della mappa
+                if not (self.map_min_x < check_x < self.map_max_x and 
+                        self.map_min_y < check_y < self.map_max_y):
                     is_safe = False
-                    break 
+                    break
+
+                # 2. Verifica che il punto non sia dentro nessun ostacolo
+                for (wx, wy, sx, sy) in self.map_obstacles:
+                    # Manteniamo il margine per assicurarci che ci sia spazio non solo 
+                    # per un singolo punto, ma per l'ingombro del robot
+                    w_min_x = wx - (sx / 2.0) - margin
+                    w_max_x = wx + (sx / 2.0) + margin
+                    w_min_y = wy - (sy / 2.0) - margin
+                    w_max_y = wy + (sy / 2.0) + margin
+
+                    if (w_min_x < check_x < w_max_x) and (w_min_y < check_y < w_max_y):
+                        is_safe = False
+                        break # Esce dal ciclo degli ostacoli
+                
+                if not is_safe:
+                    break # Esce dal ciclo delle distanze (riparte il While True)
 
             if is_safe:
                 return px, py, yaw
@@ -128,7 +166,7 @@ class Respawner(Node):
 
         # Invia la richiesta a Gazebo tramite comando da terminale,
         # aggirando il bug del servizio ROS 2 /set_entity_state in Humble
-        cmd = f"gz model -m {self.robot_name} -x {px:.3f} -y {py:.3f} -z 0.00 -Y {yaw:.3f}"
+        cmd = f"gz model -m {self.robot_name} -x {px:.3f} -y {py:.3f} -z 0.05 -Y {yaw:.3f}"
         os.system(cmd)
 
         response.success = True

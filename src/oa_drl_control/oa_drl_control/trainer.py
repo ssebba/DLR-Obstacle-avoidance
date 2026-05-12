@@ -10,6 +10,8 @@ from std_msgs.msg import Float32MultiArray
 from rclpy.qos import qos_profile_sensor_data
 # for the RML
 import os
+import json
+from pathlib import Path
 os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 import tensorflow as tf
 # Limit use of GPU to avoid crashes
@@ -20,7 +22,7 @@ if gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as e:
         print(e)
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, Empty
 import random
 from collections import deque
 import csv
@@ -33,7 +35,7 @@ class Trainer(Node):
         
         # Node parameters
         self.declare_parameter('control_frequency', 10) 
-        self.declare_parameter('collision_tol', 0.3)  # 15-25 cm
+        self.declare_parameter('collision_tol', 0.15)  # 15-25 cm
         self.declare_parameter('linear_velocity',0.2) # define constant linear speed
         self.declare_parameter('num_lidar_ranges',50)
 
@@ -75,10 +77,9 @@ class Trainer(Node):
 
         # Clients
         self.reset_client = self.create_client(Trigger, '/randomize_robot_pose')
+        self.pause_physics_client = self.create_client(Empty, '/pause_physics')
+        self.unpause_physics_client = self.create_client(Empty, '/unpause_physics')
 
-        # Timer for the control loop
-        self.timer = self.create_timer(1/self.control_freq, self.control_loop_callback)
-        
         # Metrics and state
         self.step_count = 0
         self.total_step_count = 0
@@ -97,14 +98,36 @@ class Trainer(Node):
 
         # initialize Neural network
         self.memory = deque(maxlen=100000)
-        self.model = self.build_model()
-        self.target_model = self.build_model()
-        self.update_target_model() #at first the two networks has to be the same
+        
+        model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+        metadata_path = Path.home() / "ros_ws" / "models" / "training_metadata.json"
+        
+        if os.path.exists(model_path):
+            self.model = tf.keras.models.load_model(model_path)
+            self.target_model = tf.keras.models.load_model(model_path)
+            self.get_logger().info('Trovato un modello pre-addestrato! Caricamento in corso...')
+            
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    self.epoch_count = metadata.get('epoch_count', 0)
+                    self.epsilon = metadata.get('epsilon', self.get_parameter('epsilon').value)
+                self.get_logger().info(f'Ripresa dal checkpoint: Episodio {self.epoch_count}, Epsilon {self.epsilon:.3f}')
+            
+            mode = 'a'
+        else:
+            self.model = self.build_model()
+            self.target_model = self.build_model()
+            self.update_target_model() #at first the two networks has to be the same
+            mode = 'w'
         
         # CSV Logging
-        self.csv_file = open('/home/seba/ros_ws/models/training_log.csv', mode='w', newline='')
+        csv_path = Path.home() / "ros_ws" / "models" / "training_log.csv"
+        file_exists = os.path.isfile(csv_path)
+        self.csv_file = open(csv_path, mode=mode, newline='')
         self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(['Episode', 'Total_Reward', 'Avg_Q_Value', 'Steps'])
+        if mode == 'w' or not file_exists:
+            self.csv_writer.writerow(['Episode', 'Total_Reward', 'Avg_Q_Value', 'Steps'])
         self.episode_q_values = []
         
         self.get_logger().info('Controller inizializzato')
@@ -163,8 +186,18 @@ class Trainer(Node):
             self.skip_lidar_scans -= 1
             return
             
+        if self.is_resetting:
+            return
+            
+        req = Empty.Request()
+        self.pause_physics_client.call_async(req) # pause gazebo
+
         self.state = np.array(msg.data)
         self.state = self.state.reshape(1, len(self.state))
+        
+        self.control_loop_callback() # execute the control loop 
+        
+        self.unpause_physics_client.call_async(req) # unpause gazebo
     
     
     def check_collision(self, distances) -> bool:
@@ -214,18 +247,23 @@ class Trainer(Node):
         self.epoch_count += 1
         self.episode_reward = 0.0   # reset reward for the new episode
 
-        self.train_model()  # train the model at each epoch
-
         if self.epoch_count == 3000:
-            self.model.save('/home/seba/ros_ws/models/trained_model_FINAL.h5')
-            self.get_logger().info('Raggiunti 3000 episodi. Salvataggio FINAL model e chiusura totale.')
+            save_model_path_final = Path.home() / "ros_ws" / "models" / "trained_model_FINAL.h5"
+            save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+            metadata_path = Path.home() / "ros_ws" / "models" / "training_metadata.json"
+            self.model.save(save_model_path_final)
+            self.get_logger().info(f'Raggiunti 3000 episodi. Salvataggio FINAL model e chiusura totale.')
             os.system('killall -9 gzserver gzclient > /dev/null 2>&1')
             os.system('killall -9 filter_lidar spawn_entity.py respawner > /dev/null 2>&1')
             sys.exit(0)
 
         if self.epoch_count % 50 == 0:  # save the model every 50 epoch
-            self.model.save('/home/seba/ros_ws/models/trained_model.h5')
-            self.get_logger().info('Model saved!')
+            save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+            metadata_path = Path.home() / "ros_ws" / "models" / "training_metadata.json"
+            self.model.save(save_model_path)
+            with open(metadata_path, 'w') as f:
+                json.dump({'epoch_count': self.epoch_count, 'epsilon': self.epsilon}, f)
+            self.get_logger().info(f'Modello e metadati salvati all\'episodio {self.epoch_count}!')
 
     def reset_done_callback(self, future):
         # try:
@@ -242,7 +280,7 @@ class Trainer(Node):
                 self.stop_flag = False
                 self.step_count = 0
                 self.state = None  
-                self.skip_lidar_scans = 3  # Ignore next 3 scans to let physics and buffers settle
+                self.skip_lidar_scans = 15  # Ignore next 15 scans to let physics and buffers settle
                 self.is_resetting = False
             else:
                 self.get_logger().error(f'Reset failed: {response.message}')
@@ -276,13 +314,14 @@ class Trainer(Node):
             self.memory.append((self.previous_state, self.previous_action, reward, self.state, collision))
 
         # 3. Reset robot if collision or timeout achieved 
-        if self.step_count > 300 or collision:
+        if self.step_count > 3000 or collision:
             self.stop_robot()  # assign to the robot 0 linear and angular speed 
             self.is_resetting = True
             err = 'COLLISION' if collision else 'TIMEOUT'
             self.get_logger().error(f'Episode {self.epoch_count} finished: {err}. Total reward: {self.episode_reward} Resetting the robot...')
             
             self.reset_simulation() # resets the robot pose
+            self.total_step_count += 1
             return
 
         # 4. Select action of the robot
@@ -308,7 +347,7 @@ class Trainer(Node):
         self.train_model()
 
         # 7. Update the neural network
-        if self.total_step_count % self.target_update_freq == 0:
+        if self.total_step_count % self.target_update_freq == 0 and self.total_step_count != 0:
             self.target_model.set_weights(self.model.get_weights())
             self.get_logger().info('Target Network Updated!')
 

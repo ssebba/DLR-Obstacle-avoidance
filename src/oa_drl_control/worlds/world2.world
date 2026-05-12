@@ -117,28 +117,6 @@
           <wrench>0 0 0 0 -0 0</wrench>
         </link>
       </model>
-      <model name='turtlebot3_burger'>
-        <pose>-0.000157 0.00078 -0.001001 -1.4e-05 0.007706 0.012306</pose>
-        <scale>1 1 1</scale>
-        <link name='base_footprint'>
-          <pose>-0.000157 0.00078 -0.001001 -1.4e-05 0.007706 0.012306</pose>
-          <velocity>-0 1e-06 3.6e-05 4.2e-05 -0.00018 1.7e-05</velocity>
-          <acceleration>-0 0 -0 0 -0 0</acceleration>
-          <wrench>-0 0 -0 0 -0 0</wrench>
-        </link>
-        <link name='wheel_left_link'>
-          <pose>-0.000887 0.080777 0.031997 -1.57002 -0.022377 0.012282</pose>
-          <velocity>-7e-06 -1e-06 3.9e-05 3.5e-05 -0.000196 1.5e-05</velocity>
-          <acceleration>-0 0 -0 0 -0 0</acceleration>
-          <wrench>-0 0 -0 0 -0 0</wrench>
-        </link>
-        <link name='wheel_right_link'>
-          <pose>0.001082 -0.079211 0.031999 -1.57002 0.036684 0.012328</pose>
-          <velocity>-4e-06 -1e-06 3.3e-05 3.5e-05 -0.000164 1.9e-05</velocity>
-          <acceleration>0 0 -0 0 -0 0</acceleration>
-          <wrench>0 0 -0 0 -0 0</wrench>
-        </link>
-      </model>
       <model name='world2'>
         <pose>0.848105 0.14674 0 0 -0 0</pose>
         <scale>1 1 1</scale>
