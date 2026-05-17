@@ -9,6 +9,8 @@ import os
 from ament_index_python.packages import get_package_share_directory
 import random
 import math
+from pathlib import Path
+import csv
 
 class Respawner(Node):
     
@@ -16,12 +18,14 @@ class Respawner(Node):
         super().__init__("respawner")
 
         self.declare_parameter('package_name', 'oa_drl_control')
-        self.declare_parameter('world_file', 'world1.world')
+        self.declare_parameter('world_file', 'world_train.world')
         self.declare_parameter('robot_name', 'burger')
+        self.declare_parameter('margin', 0.2)
 
         pkg_name = self.get_parameter('package_name').value
         world_file = self.get_parameter('world_file').value
         self.robot_name = self.get_parameter('robot_name').value
+        self.margin = self.get_parameter('margin').value
 
         self.map_obstacles = self.parse_world_file(pkg_name, world_file)
         if self.map_obstacles:
@@ -40,8 +44,18 @@ class Respawner(Node):
         self.set_state_client = self.create_client(SetEntityState, '/set_entity_state', callback_group=self.cb_group)
         self.srv = self.create_service(Trigger, '/randomize_robot_pose', self.handle_randomize_pose, callback_group=self.cb_group)
 
+        self.csv_filepath = Path.home() / "ros_ws" / "models" / "valid_poses.csv"
+        
+        if not os.path.exists(self.csv_filepath):
+            with open(self.csv_filepath, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(['x', 'y', 'yaw'])
+            self.get_logger().info(f'Created new CSV for the poses: {self.csv_filepath}')
+
         self.get_logger().info('Respawner initialized.')
+
     
+
 
     def parse_world_file(self, package_name, world_file_name):
         walls = []
@@ -110,18 +124,19 @@ class Respawner(Node):
     def yaw_to_quaternion(self, yaw):
         return 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
-    def get_random_safe_pose(self, margin=0.6, forward_clearance=0.55):
+    def get_random_safe_pose(self, margin=0.6, forward_clearance=0.6):
         min_x = self.map_min_x + margin
         max_x = self.map_max_x - margin
         min_y = self.map_min_y + margin
         max_y = self.map_max_y - margin
 
-        # Creiamo degli step per controllare lo spazio davanti al robot.
-        # Controllare solo la fine del segmento (0.55) potrebbe farci saltare
-        # muri molto sottili che si trovano in mezzo.
         steps = 5
         check_distances = [forward_clearance * (i / steps) for i in range(steps + 1)]
-        # Questo genererà distanze: [0.0, 0.11, 0.22, 0.33, 0.44, 0.55]
+
+        # Consideriamo un margine ridotto per i punti "proiettati" in avanti.
+        # Questo rappresenta circa l'ingombro del robot stesso (es. raggio di 15-20cm),
+        # altrimenti sommeresti 60cm al punto che è già 55cm in avanti!
+        point_margin = 0.20 
 
         while True:
             px = random.uniform(min_x, max_x)
@@ -130,39 +145,48 @@ class Respawner(Node):
 
             is_safe = True
             
-            # Controlliamo il centro del robot e i punti di fronte a lui
             for d in check_distances:
-                # Calcoliamo il punto "d" metri davanti al robot
                 check_x = px + d * math.cos(yaw)
                 check_y = py + d * math.sin(yaw)
 
-                # 1. Verifica che lo spazio davanti non esca dai limiti della mappa
+                # 1. Verifica limiti mappa
                 if not (self.map_min_x < check_x < self.map_max_x and 
                         self.map_min_y < check_y < self.map_max_y):
                     is_safe = False
                     break
 
-                # 2. Verifica che il punto non sia dentro nessun ostacolo
+                # Scegliamo quale margine usare: 
+                # Se d == 0 (centro del robot), usiamo il margin grande (0.6)
+                # Se d > 0 (punto di proiezione frontale), usiamo il margin piccolo per l'ingombro
+                current_margin = margin if d == 0.0 else point_margin
+
+                # 2. Verifica collisione con ostacoli
                 for (wx, wy, sx, sy) in self.map_obstacles:
-                    # Manteniamo il margine per assicurarci che ci sia spazio non solo 
-                    # per un singolo punto, ma per l'ingombro del robot
-                    w_min_x = wx - (sx / 2.0) - margin
-                    w_max_x = wx + (sx / 2.0) + margin
-                    w_min_y = wy - (sy / 2.0) - margin
-                    w_max_y = wy + (sy / 2.0) + margin
+                    w_min_x = wx - (sx / 2.0) - current_margin
+                    w_max_x = wx + (sx / 2.0) + current_margin
+                    w_min_y = wy - (sy / 2.0) - current_margin
+                    w_max_y = wy + (sy / 2.0) + current_margin
 
                     if (w_min_x < check_x < w_max_x) and (w_min_y < check_y < w_max_y):
                         is_safe = False
-                        break # Esce dal ciclo degli ostacoli
+                        break 
                 
                 if not is_safe:
-                    break # Esce dal ciclo delle distanze (riparte il While True)
+                    break 
 
             if is_safe:
                 return px, py, yaw
 
     def handle_randomize_pose(self, request, response):
-        px, py, yaw = self.get_random_safe_pose(margin=0.6)
+        px, py, yaw = self.get_random_safe_pose(margin=self.margin)
+
+        try:
+            with open(self.csv_filepath, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                # Arrotondiamo a 3 cifre decimali per mantenere il CSV pulito
+                writer.writerow([f"{px:.3f}", f"{py:.3f}", f"{yaw:.3f}"])
+        except Exception as e:
+            self.get_logger().error(f"Errore durante il salvataggio nel CSV: {e}")
 
         # Invia la richiesta a Gazebo tramite comando da terminale,
         # aggirando il bug del servizio ROS 2 /set_entity_state in Humble

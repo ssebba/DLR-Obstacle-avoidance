@@ -37,20 +37,20 @@ class Trainer(Node):
         self.declare_parameter('control_frequency', 10) 
         self.declare_parameter('collision_tol', 0.15)  # 15-25 cm
         self.declare_parameter('linear_velocity',0.2) # define constant linear speed
-        self.declare_parameter('num_lidar_ranges',50)
+        self.declare_parameter('num_lidar_ranges',50) # how many values for lidar data
 
         self.control_freq = self.get_parameter('control_frequency').value
         self.collision_tol = self.get_parameter('collision_tol').value
         self.linear_velocity = self.get_parameter('linear_velocity').value
 
         # Parameters for DRL
-        self.declare_parameter('action_size', 11) #number of option the robot can select
+        self.declare_parameter('action_size', 11) #number of options (actions) the robot can select
         self.declare_parameter('gamma',0.99) # weight of future prizes
         self.declare_parameter('epsilon',1.0) # Initial epsilon
         self.declare_parameter('epsilon_min',0.05) # minimum epsilon
         self.declare_parameter('beta',0.999) # beta factor
-        self.declare_parameter('batch_size',64) # batch dimension 
-        self.declare_parameter('target_update_freq',500)
+        self.declare_parameter('batch_size',128) # batch dimension 
+        self.declare_parameter('target_update_freq',2500) # after how many steps we update the target network
 
         self.action_size = self.get_parameter('action_size').value
         self.gamma = self.get_parameter('gamma').value
@@ -65,63 +65,74 @@ class Trainer(Node):
             Float32MultiArray,
             '/lidar_data',
             self.scan_callback,
-            qos_profile_sensor_data
+            1
         )
         
         # Publisher
         self.cmd_vel_publisher = self.create_publisher(
             Twist,
             '/cmd_vel',
-            10
+            1
         )
 
         # Clients
-        self.reset_client = self.create_client(Trigger, '/randomize_robot_pose')
-        self.pause_physics_client = self.create_client(Empty, '/pause_physics')
-        self.unpause_physics_client = self.create_client(Empty, '/unpause_physics')
+        self.reset_client = self.create_client(Trigger, '/randomize_robot_pose') # to reset the robot
+        self.pause_physics_client = self.create_client(Empty, '/pause_physics') # to stop simulation
+        self.unpause_physics_client = self.create_client(Empty, '/unpause_physics') # to resume simulation  
 
-        # Metrics and state
-        self.step_count = 0
-        self.total_step_count = 0
-        self.epoch_count = 0
-        self.episode_reward = 0.0
-        self.feedback_rate = 50
+        # Initialize metrics and state
+        self.step_count = 0 #steps counter for each episode
+        self.total_step_count = 0 #total steps counter
+        self.epoch_count = 0 #number of episodes 
+        self.episode_reward = 0.0 #total reward for the episode
+        self.feedback_rate = 50 #print feedback every 50 steps
 
         # initialize robot
-        self.navigation_active = True
-        self.stop_flag = False
-        self.state = None
-        self.previous_state = None
-        self.previous_action = None
-        self.is_resetting = False
-        self.skip_lidar_scans = 0
+        self.navigation_active = True #to check if the robot is active 
+        self.stop_flag = False #to stop the robot
+        self.state = None #current state of the robot
+        self.previous_state = None #previous state of the robot
+        self.previous_action = None #previous action of the robot
+        self.is_resetting = False #to check if the robot is resetting
+        self.skip_lidar_scans = 0 #to skip lidar scans 
 
         # initialize Neural network
-        self.memory = deque(maxlen=100000)
+        self.memory = deque(maxlen=100000) #memory to store past experiences, minibatch will sample from here
         
-        model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+        #model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+        model_path = Path.home() / "ros_ws" / "models" / "trained_model.keras"
         metadata_path = Path.home() / "ros_ws" / "models" / "training_metadata.json"
         
-        if os.path.exists(model_path):
+
+        # Load or create a neural network 
+
+        # if os.path.exists(model_path): # load the neural network 
+        #     self.model = tf.keras.models.load_model(model_path)
+        #     self.target_model = tf.keras.models.load_model(model_path)
+        #     self.get_logger().info('Trovato un modello pre-addestrato! Caricamento in corso...')
+        if os.path.exists(model_path): # load the neural network
+            # self.model = tf.keras.models.load_model(model_path, compile=False)
+            # self.target_model = tf.keras.models.load_model(model_path, compile=False)
+            # self.model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse')
+            # self.target_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse')
+            # self.get_logger().info('Found previous model! Loading and compiling...')
             self.model = tf.keras.models.load_model(model_path)
             self.target_model = tf.keras.models.load_model(model_path)
-            self.get_logger().info('Trovato un modello pre-addestrato! Caricamento in corso...')
-            
-            if os.path.exists(metadata_path):
+            self.get_logger().info('Found previous model! Loading and compiling...')
+            if os.path.exists(metadata_path): #load epoch count and epsilon from previous stopped training
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
                     self.epoch_count = metadata.get('epoch_count', 0)
                     self.epsilon = metadata.get('epsilon', self.get_parameter('epsilon').value)
-                self.get_logger().info(f'Ripresa dal checkpoint: Episodio {self.epoch_count}, Epsilon {self.epsilon:.3f}')
-            
+                self.get_logger().info(f'Training resumed: Episode {self.epoch_count}, Epsilon {self.epsilon:.3f}')
             mode = 'a'
-        else:
+        else: # create a new neural network
             self.model = self.build_model()
             self.target_model = self.build_model()
             self.update_target_model() #at first the two networks has to be the same
             mode = 'w'
         
-        # CSV Logging
+        # CSV Logging to save reward of episode and average value of Q
         csv_path = Path.home() / "ros_ws" / "models" / "training_log.csv"
         file_exists = os.path.isfile(csv_path)
         self.csv_file = open(csv_path, mode=mode, newline='')
@@ -130,10 +141,10 @@ class Trainer(Node):
             self.csv_writer.writerow(['Episode', 'Total_Reward', 'Avg_Q_Value', 'Steps'])
         self.episode_q_values = []
         
-        self.get_logger().info('Controller inizializzato')
+        # Log that the trainer was initialized
+        self.get_logger().info('Trainer initialized')
 
-    def build_model(self):
-        
+    def build_model(self):  # function to create the a new neural network
         model = tf.keras.Sequential([
             tf.keras.layers.InputLayer(input_shape=(self.get_parameter('num_lidar_ranges').value,)),
             tf.keras.layers.Dense(300, activation='relu'),
@@ -143,41 +154,41 @@ class Trainer(Node):
         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse')
         return model
 
-    def update_target_model(self):
+    def update_target_model(self): # function to update the target network with the weights of the main network
         self.target_model.set_weights(self.model.get_weights())
 
-    def train_model(self):
-        if len(self.memory) < self.batch_size:
+    def train_model(self): # function to train the neural network 
+        if len(self.memory) < self.batch_size: #check if there are enough experiences in the memory to train the network
             return
 
-        minibatch = random.sample(self.memory, self.batch_size)
-        states = np.vstack([x[0] for x in minibatch])
-        actions = np.array([x[1] for x in minibatch])
-        rewards = np.array([x[2] for x in minibatch])
-        next_states = np.vstack([x[3] for x in minibatch])
-        dones = np.array([x[4] for x in minibatch])
+        minibatch = random.sample(self.memory, self.batch_size) # random sample from the memory
+        states = np.vstack([x[0] for x in minibatch]) # stack the states
+        actions = np.array([x[1] for x in minibatch]) # stack the actions
+        rewards = np.array([x[2] for x in minibatch]) # stack the rewards
+        next_states = np.vstack([x[3] for x in minibatch]) # stack the next states
+        dones = np.array([x[4] for x in minibatch]) # stack the dones
 
-        # 2. LOGICA DDQN: Chiediamo alla Main Network quale azione farebbe nel 'next_state' [cite: 256, 260]
+        # Predict from main network and find index of best action
         next_q_values_main = self.model.predict(next_states, verbose=0)
         best_next_actions = np.argmax(next_q_values_main, axis=1)
         
-        # 3. Chiediamo alla Target Network di "valutare" quell'azione [cite: 256]
+        # Predict from target network 
         next_q_values_target = self.target_model.predict(next_states, verbose=0)
         
-        # 4. Calcoliamo i Q-value attuali per poterli correggere
+        # compute q value with main network and get rewards of previous state 
         target_q_values = self.model.predict(states, verbose=0)
         
-        # 5. Applichiamo la formula matematica del paper per ogni ricordo nel batch
+        # apply the formula of the paper
         for i in range(self.batch_size):
             if dones[i]: 
-                # Se c'è stata collisione (riga 10-11 del paper) 
+                # if there was a collision
                 target_q_values[i][actions[i]] = rewards[i] 
             else:
-                # Altrimenti aggiungiamo il premio futuro scontato (gamma) (riga 12-13 del paper) 
-                # yi = r_i+1 + gamma * Q_target(s_i+1, argmax(Q_main)) [cite: 253, 260]
+                # otherwise add the discounted future reward (gamma)
+                # y_i = r_i+1 + gamma * Q_target(s_i+1, argmax(Q_main))
                 target_q_values[i][actions[i]] = rewards[i] + self.gamma * next_q_values_target[i][best_next_actions[i]]
                 
-        # 6. Addestriamo la rete (Discesa del Gradiente) sui valori corretti 
+        # Train the network with the correct values
         self.model.fit(states, target_q_values, batch_size=self.batch_size, epochs=1, verbose=0)
     
     def scan_callback(self, msg: Float32MultiArray):
@@ -186,14 +197,14 @@ class Trainer(Node):
             self.skip_lidar_scans -= 1
             return
             
-        if self.is_resetting:
+        if self.is_resetting: # if the robot is resetting avoid to take action
             return
             
         req = Empty.Request()
-        self.pause_physics_client.call_async(req) # pause gazebo
+        self.pause_physics_client.call_async(req) # pause gazebo, it's needed to avoid the robot to move while executing control actions
 
         self.state = np.array(msg.data)
-        self.state = self.state.reshape(1, len(self.state))
+        self.state = self.state.reshape(1, len(self.state)) # reshape the state to be a 2D array instead of a vector
         
         self.control_loop_callback() # execute the control loop 
         
@@ -211,10 +222,10 @@ class Trainer(Node):
         if distances.size == 0:
             return False
         
-        min_range = np.min(distances)
+        min_range = np.min(distances) # take the minimum range to check for collision
         collision_threshold = self.collision_tol
 
-        if min_range < collision_threshold:
+        if min_range < collision_threshold: # if the minimum range is less than the threshold -> collision
             self.get_logger().warn(f'Collisione rilevata! Min range: {min_range:.3f}m')
             self.stop_flag = True
             return True
@@ -225,16 +236,16 @@ class Trainer(Node):
         """
         Resets the robot to inizial state in Gazebo environment
         """
-        if not self.reset_client.wait_for_service(timeout_sec=1.0):
+        if not self.reset_client.wait_for_service(timeout_sec=1.0): # wait for the reset service to be available
             self.get_logger().info("In attesa del servizio /randomize_robot_pose")
             self.is_resetting = False
             return
 
         request = Trigger.Request()
-        future = self.reset_client.call_async(request)      # sends request to reset the robot
+        future = self.reset_client.call_async(request)      # sends request to reset the robot to the server (another node)
         future.add_done_callback(self.reset_done_callback)    # after that execute the reset_done_callback function
 
-        # Log the finished episode stats before resetting
+        # Log on the csv file the reward and mean q values of the episode before resetting
         avg_q = float(np.mean(self.episode_q_values)) if self.episode_q_values else 0.0
         self.csv_writer.writerow([self.epoch_count, self.episode_reward, avg_q, self.step_count])
         self.csv_file.flush()
@@ -247,9 +258,11 @@ class Trainer(Node):
         self.epoch_count += 1
         self.episode_reward = 0.0   # reset reward for the new episode
 
-        if self.epoch_count == 3000:
-            save_model_path_final = Path.home() / "ros_ws" / "models" / "trained_model_FINAL.h5"
-            save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+        if self.epoch_count == 3000: # save the final model and stop the training
+            #save_model_path_final = Path.home() / "ros_ws" / "models" / "trained_model_FINAL.h5"
+            #save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+            save_model_path_final = Path.home() / "ros_ws" / "models" / "trained_model_FINAL.keras"
+            save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.keras"
             metadata_path = Path.home() / "ros_ws" / "models" / "training_metadata.json"
             self.model.save(save_model_path_final)
             self.get_logger().info(f'Raggiunti 3000 episodi. Salvataggio FINAL model e chiusura totale.')
@@ -258,7 +271,8 @@ class Trainer(Node):
             sys.exit(0)
 
         if self.epoch_count % 50 == 0:  # save the model every 50 epoch
-            save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+            #save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.h5"
+            save_model_path = Path.home() / "ros_ws" / "models" / "trained_model.keras"
             metadata_path = Path.home() / "ros_ws" / "models" / "training_metadata.json"
             self.model.save(save_model_path)
             with open(metadata_path, 'w') as f:
@@ -266,13 +280,10 @@ class Trainer(Node):
             self.get_logger().info(f'Modello e metadati salvati all\'episodio {self.epoch_count}!')
 
     def reset_done_callback(self, future):
-        # try:
-        #     future.result()
-        #     self.get_logger().info('Reset succeded!')
-        #     self.stop_flag = False
-        #     self.step_count = 0
-        #     self.is_resetting = False
-
+        '''
+        This function is called after the reset service is called
+        It sets the state to None, the skip_lidar_scans to 15 and the is_resetting to False
+        '''
         try:
             response = future.result()
             if response.success:
@@ -329,11 +340,9 @@ class Trainer(Node):
         self.episode_q_values.append(float(np.max(q_values[0])))
 
         if random.random() < self.epsilon:  
-            m = random.randint(0, self.action_size -1) # choose a random action with probability epsilon
-            self.previous_state = self.state.copy()
+            m = random.randint(0, self.action_size -1) # choose a random index foraction with probability epsilon
         else:
-            m = int(np.argmax(q_values[0]))
-            self.previous_state = self.state.copy()
+            m = int(np.argmax(q_values[0])) # could write q_values without index, but better specify it 
         omega_m = -0.8 + 0.16 * m   # find angular velocity of the robot
         
         # 5. Publish action
@@ -343,6 +352,7 @@ class Trainer(Node):
         self.cmd_vel_publisher.publish(cmd_msg)
 
         # 6. Train the model
+        self.previous_state = self.state.copy()
         self.previous_action = m
         self.train_model()
 
