@@ -34,7 +34,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     x_pose = LaunchConfiguration('x_pose', default='-5.0')
     y_pose = LaunchConfiguration('y_pose', default='3.5')
-    lidar_rate = LaunchConfiguration('lidar_rate', default='15')
+    lidar_rate = LaunchConfiguration('lidar_rate', default='10')
 
     world = os.path.join(
         get_package_share_directory('oa_drl_control'),
