@@ -32,22 +32,21 @@ def generate_launch_description():
     pkg_gazebo_ros = get_package_share_directory('gazebo_ros')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
-    x_pose = LaunchConfiguration('x_pose', default='0.0')
-    y_pose = LaunchConfiguration('y_pose', default='0.0')
+    x_pose = LaunchConfiguration('x_pose', default='-5.0')
+    y_pose = LaunchConfiguration('y_pose', default='3.5')
+    lidar_rate = LaunchConfiguration('lidar_rate', default='15')
 
     world = os.path.join(
         get_package_share_directory('oa_drl_control'),
         'worlds',
-        'world_train.world'
+        'training_env.world'
     )
 
     gzserver_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_gazebo_ros, 'launch', 'gzserver.launch.py')
         ),
-        launch_arguments={'world': world,
-        'extra_gazebo_args': '-s libgazebo_ros_state.so'
-        }.items()
+        launch_arguments={'world': world}.items()
     )
 
     gzclient_cmd = IncludeLaunchDescription(
@@ -69,7 +68,8 @@ def generate_launch_description():
         ),
         launch_arguments={
             'x_pose': x_pose,
-            'y_pose': y_pose
+            'y_pose': y_pose,
+            'lidar_rate': lidar_rate
         }.items()
     )
 
@@ -85,7 +85,7 @@ def generate_launch_description():
 
     # Add the commands to the launch description
     ld.add_action(gzserver_cmd)
-    #ld.add_action(gzclient_cmd)
+    ld.add_action(gzclient_cmd)
     ld.add_action(robot_state_publisher_cmd)
     ld.add_action(spawn_turtlebot_cmd)
 

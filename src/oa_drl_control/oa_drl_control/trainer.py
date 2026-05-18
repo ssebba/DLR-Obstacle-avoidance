@@ -83,7 +83,7 @@ class Trainer(Node):
         # Initialize metrics and state
         self.step_count = 0 #steps counter for each episode
         self.total_step_count = 0 #total steps counter
-        self.epoch_count = 0 #number of episodes 
+        self.epoch_count = 1 #number of episodes 
         self.episode_reward = 0.0 #total reward for the episode
         self.feedback_rate = 50 #print feedback every 50 steps
 
@@ -238,7 +238,6 @@ class Trainer(Node):
         """
         if not self.reset_client.wait_for_service(timeout_sec=1.0): # wait for the reset service to be available
             self.get_logger().info("In attesa del servizio /randomize_robot_pose")
-            self.is_resetting = False
             return
 
         request = Trigger.Request()
@@ -295,11 +294,9 @@ class Trainer(Node):
                 self.is_resetting = False
             else:
                 self.get_logger().error(f'Reset failed: {response.message}')
-                self.is_resetting = False
         
         except Exception as e:
             self.get_logger().error(f'Impossible to reset the robot: {e}')
-            self.is_resetting = False
 
         
 
@@ -308,7 +305,11 @@ class Trainer(Node):
         Callback of the timer for the DWA control loop
         """
 
-        if self.state is None or not self.navigation_active or self.is_resetting:
+        if self.state is None or not self.navigation_active:
+            return
+
+        if self.is_resetting:
+            self.reset_simulation()
             return
 
         # 1. Check for collision and assign reward for this step
