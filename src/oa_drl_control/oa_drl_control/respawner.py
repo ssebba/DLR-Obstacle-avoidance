@@ -18,7 +18,7 @@ class Respawner(Node):
         super().__init__("respawner")
 
         self.declare_parameter('package_name', 'oa_drl_control')
-        self.declare_parameter('world_file', 'world_train.world')
+        self.declare_parameter('world_file', 'training_env.world')
         self.declare_parameter('robot_name', 'burger')
         self.declare_parameter('margin', 0.2)
 
@@ -54,9 +54,6 @@ class Respawner(Node):
 
         self.get_logger().info('Respawner initialized.')
 
-    
-
-
     def parse_world_file(self, package_name, world_file_name):
         walls = []
         try:
@@ -69,53 +66,108 @@ class Respawner(Node):
             clean_content = world_content.replace('ignition::', 'ignition_')
             root = ET.fromstring(clean_content)
 
-            # First extract global offsets from the <state> section
-            model_offsets = {}
-            for state_model in root.findall('.//state/model'):
-                name = state_model.get('name')
-                pose_tag = state_model.find('pose')
-                if pose_tag is not None:
-                    mp_vals = [float(v) for v in pose_tag.text.split()]
-                    model_offsets[name] = (mp_vals[0], mp_vals[1], mp_vals[5])
+            # Check if there is an OBJ file referenced in the world
+            obj_mesh_path = None
+            for uri in root.findall('.//mesh/uri'):
+                if uri.text and uri.text.endswith('.obj'):
+                    obj_mesh_path = uri.text
+                    break
 
-            for model in root.findall('.//model'):
-                model_name = model.get('name')
-                if model_name in ['ground_plane', 'turtlebot3_burger']:
-                    continue
-
-                # Read model global offset: prefer state offset, fallback to model pose
-                mx, my, myaw = 0.0, 0.0, 0.0
-                if model_name in model_offsets:
-                    mx, my, myaw = model_offsets[model_name]
+            if obj_mesh_path:
+                if obj_mesh_path.startswith('model://'):
+                    parts = obj_mesh_path[len('model://'):].split('/')
+                    pkg = parts[0]
+                    rel_path = '/'.join(parts[1:])
+                    obj_path = os.path.join(get_package_share_directory(pkg), rel_path)
+                elif obj_mesh_path.startswith('file://'):
+                    obj_path = obj_mesh_path[len('file://'):]
                 else:
-                    model_pose_tag = model.find('pose')
-                    if model_pose_tag is not None:
-                        mp_vals = [float(v) for v in model_pose_tag.text.split()]
-                        mx, my, myaw = mp_vals[0], mp_vals[1], mp_vals[5]
+                    obj_path = os.path.join(pkg_share_dir, 'worlds', os.path.basename(obj_mesh_path))
+                
+                self.get_logger().info(f'Parsing OBJ file for obstacles: {obj_path}')
+                
+                vertices = []
+                triangles = []
+                with open(obj_path, 'r') as f_obj:
+                    for line in f_obj:
+                        if line.startswith('v '):
+                            parts = line.split()
+                            vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                        elif line.startswith('f '):
+                            parts = line.split()
+                            v1 = int(parts[1].split('/')[0]) - 1
+                            v2 = int(parts[2].split('/')[0]) - 1
+                            v3 = int(parts[3].split('/')[0]) - 1
+                            triangles.append((vertices[v1], vertices[v2], vertices[v3]))
+                
+                # We assume Gazebo uses Z-up, while Fusion OBJ uses Y-up (hence the 90-degree world rotation).
+                for t in triangles:
+                    # Filter for top of the walls (vertices above 1.0 on Y axis)
+                    if all(v[1] > 1.0 for v in t):
+                        # Gazebo X = OBJ X, Gazebo Y = -OBJ Z
+                        gx = [v[0] for v in t]
+                        gy = [-v[2] for v in t]
+                        min_x, max_x = min(gx), max(gx)
+                        min_y, max_y = min(gy), max(gy)
+                        
+                        center_x = (min_x + max_x) / 2.0
+                        center_y = (min_y + max_y) / 2.0
+                        size_x = max_x - min_x
+                        size_y = max_y - min_y
+                        
+                        # Add a minimum thickness just in case the triangle edge is perfectly aligned
+                        if size_x < 0.01: size_x = 0.01
+                        if size_y < 0.01: size_y = 0.01
+                        
+                        walls.append((center_x, center_y, size_x, size_y))
+            else:
+                # First extract global offsets from the <state> section
+                model_offsets = {}
+                for state_model in root.findall('.//state/model'):
+                    name = state_model.get('name')
+                    pose_tag = state_model.find('pose')
+                    if pose_tag is not None:
+                        mp_vals = [float(v) for v in pose_tag.text.split()]
+                        model_offsets[name] = (mp_vals[0], mp_vals[1], mp_vals[5])
 
-                for link in model.findall('.//link'):
-                    pose_tag = link.find('pose')
-                    size_tag = link.find('.//collision/geometry/box/size')
+                for model in root.findall('.//model'):
+                    model_name = model.get('name')
+                    if model_name in ['ground_plane', 'turtlebot3_burger']:
+                        continue
 
-                    if pose_tag is not None and size_tag is not None:
-                        pose_vals = [float(v) for v in pose_tag.text.split()]
-                        size_vals = [float(v) for v in size_tag.text.split()]
-                        
-                        lx, ly, lyaw = pose_vals[0], pose_vals[1], pose_vals[5]
-                        
-                        # Apply model offset and rotation
-                        world_x = mx + lx * math.cos(myaw) - ly * math.sin(myaw)
-                        world_y = my + lx * math.sin(myaw) + ly * math.cos(myaw)
-                        global_yaw = myaw + lyaw
-                        
-                        sx, sy = size_vals[0], size_vals[1]
-                        
-                        # If the wall is rotated ~90 or ~270 degrees, swap sx and sy for the bounding box
-                        if abs(math.cos(global_yaw)) < 0.5:
-                            sx, sy = sy, sx
+                    # Read model global offset: prefer state offset, fallback to model pose
+                    mx, my, myaw = 0.0, 0.0, 0.0
+                    if model_name in model_offsets:
+                        mx, my, myaw = model_offsets[model_name]
+                    else:
+                        model_pose_tag = model.find('pose')
+                        if model_pose_tag is not None:
+                            mp_vals = [float(v) for v in model_pose_tag.text.split()]
+                            mx, my, myaw = mp_vals[0], mp_vals[1], mp_vals[5]
+
+                    for link in model.findall('.//link'):
+                        pose_tag = link.find('pose')
+                        size_tag = link.find('.//collision/geometry/box/size')
+
+                        if pose_tag is not None and size_tag is not None:
+                            pose_vals = [float(v) for v in pose_tag.text.split()]
+                            size_vals = [float(v) for v in size_tag.text.split()]
                             
-                        walls.append((world_x, world_y, sx, sy))
-                        
+                            lx, ly, lyaw = pose_vals[0], pose_vals[1], pose_vals[5]
+                            
+                            # Apply model offset and rotation
+                            world_x = mx + lx * math.cos(myaw) - ly * math.sin(myaw)
+                            world_y = my + lx * math.sin(myaw) + ly * math.cos(myaw)
+                            global_yaw = myaw + lyaw
+                            
+                            sx, sy = size_vals[0], size_vals[1]
+                            
+                            # If the wall is rotated ~90 or ~270 degrees, swap sx and sy for the bounding box
+                            if abs(math.cos(global_yaw)) < 0.5:
+                                sx, sy = sy, sx
+                                
+                            walls.append((world_x, world_y, sx, sy))
+                            
             self.get_logger().info(f'Caricati {len(walls)} ostacoli dal file .world')
         except Exception as e:
             self.get_logger().error(f'Errore nel parsing del file .world: {e}')
