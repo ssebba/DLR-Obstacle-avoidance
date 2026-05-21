@@ -50,7 +50,7 @@ class Trainer(Node):
         self.declare_parameter('epsilon_min',0.05) # minimum epsilon
         self.declare_parameter('beta',0.999) # beta factor
         self.declare_parameter('batch_size',128) # batch dimension 
-        self.declare_parameter('target_update_freq',2500) # after how many steps we update the target network
+        self.declare_parameter('target_update_freq',5000) # after how many steps we update the target network
 
         self.action_size = self.get_parameter('action_size').value
         self.gamma = self.get_parameter('gamma').value
@@ -169,27 +169,45 @@ class Trainer(Node):
         dones = np.array([x[4] for x in minibatch]) # stack the dones
 
         # Predict from main network and find index of best action
-        next_q_values_main = self.model.predict(next_states, verbose=0)
+        #next_q_values_main = self.model.predict(next_states, verbose=0)
+        next_q_values_main = self.model(next_states, training=False).numpy()
         best_next_actions = np.argmax(next_q_values_main, axis=1)
         
         # Predict from target network 
-        next_q_values_target = self.target_model.predict(next_states, verbose=0)
+        #next_q_values_target = self.target_model.predict(next_states, verbose=0)
+        next_q_values_target = self.target_model(next_states, training=False).numpy()
         
         # compute q value with main network and get rewards of previous state 
-        target_q_values = self.model.predict(states, verbose=0)
+        #target_q_values = self.model.predict(states, verbose=0)
+        target_q_values = self.model(states, training=False).numpy()
+
+        # apply the formula of the paper (vectorized with NumPy for speed)
+        batch_indices = np.arange(self.batch_size)
         
-        # apply the formula of the paper
-        for i in range(self.batch_size):
-            if dones[i]: 
-                # if there was a collision
-                target_q_values[i][actions[i]] = rewards[i] 
-            else:
-                # otherwise add the discounted future reward (gamma)
-                # y_i = r_i+1 + gamma * Q_target(s_i+1, argmax(Q_main))
-                target_q_values[i][actions[i]] = rewards[i] + self.gamma * next_q_values_target[i][best_next_actions[i]]
+        # Calculate the discounted future reward
+        # y_i = r_i+1 + gamma * Q_target(s_i+1, argmax(Q_main))
+        updates = np.where(
+            dones,
+            rewards, # If collision, target is just the reward
+            rewards + self.gamma * next_q_values_target[batch_indices, best_next_actions] # Otherwise add discounted future reward
+        )
+        
+        # Update the target values for the specific actions taken
+        target_q_values[batch_indices, actions] = updates
+        
+        # #commentare tutto questo
+        # # apply the formula of the paper
+        # for i in range(self.batch_size):
+        #     if dones[i]: 
+        #         # if there was a collision
+        #         target_q_values[i][actions[i]] = rewards[i] 
+        #     else:
+        #         # otherwise add the discounted future reward (gamma)
+        #         target_q_values[i][actions[i]] = rewards[i] + self.gamma * next_q_values_target[i][best_next_actions[i]]
                 
         # Train the network with the correct values
-        self.model.fit(states, target_q_values, batch_size=self.batch_size, epochs=1, verbose=0)
+        #self.model.fit(states, target_q_values, batch_size=self.batch_size, epochs=1, verbose=0)
+        self.model.train_on_batch(states, target_q_values)
     
     def scan_callback(self, msg: Float32MultiArray):
         """Callback for LiDAR readings"""
@@ -201,14 +219,14 @@ class Trainer(Node):
             return
             
         req = Empty.Request()
-        self.pause_physics_client.call_async(req) # pause gazebo, it's needed to avoid the robot to move while executing control actions
+        #self.pause_physics_client.call_async(req) # pause gazebo, it's needed to avoid the robot to move while executing control actions
 
         self.state = np.array(msg.data)
         self.state = self.state.reshape(1, len(self.state)) # reshape the state to be a 2D array instead of a vector
         
         self.control_loop_callback() # execute the control loop 
         
-        self.unpause_physics_client.call_async(req) # unpause gazebo
+        #self.unpause_physics_client.call_async(req) # unpause gazebo
     
     
     def check_collision(self, distances) -> bool:
@@ -337,7 +355,8 @@ class Trainer(Node):
             return
 
         # 4. Select action of the robot
-        q_values = self.model.predict(self.state, verbose=0)
+        #q_values = self.model.predict(self.state, verbose=0)
+        q_values = self.model(self.state, training=False).numpy()
         self.episode_q_values.append(float(np.max(q_values[0])))
 
         if random.random() < self.epsilon:  
