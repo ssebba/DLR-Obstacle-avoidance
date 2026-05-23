@@ -40,6 +40,7 @@ def generate_launch_description():
         get_package_share_directory('oa_drl_control'),
         'worlds',
         'training_env.world'
+        #'world1.world'
     )
 
     gzserver_cmd = IncludeLaunchDescription(
@@ -85,7 +86,7 @@ def generate_launch_description():
 
     # Add the commands to the launch description
     ld.add_action(gzserver_cmd)
-    #ld.add_action(gzclient_cmd)
+    ld.add_action(gzclient_cmd)
     ld.add_action(robot_state_publisher_cmd)
     ld.add_action(spawn_turtlebot_cmd)
 

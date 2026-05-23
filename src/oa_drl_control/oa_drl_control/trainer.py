@@ -27,6 +27,8 @@ import random
 from collections import deque
 import csv
 import sys
+import threading
+import time
 
 
 class Trainer(Node):
@@ -38,9 +40,11 @@ class Trainer(Node):
         self.declare_parameter('collision_tol', 0.15)  # 15-25 cm
         self.declare_parameter('linear_velocity',0.2) # define constant linear speed
         self.declare_parameter('num_lidar_ranges',50) # how many values for lidar data
+        self.declare_parameter('lidar_max_range',5.0) # maximum range of the lidar
 
         self.control_freq = self.get_parameter('control_frequency').value
-        self.collision_tol = self.get_parameter('collision_tol').value
+        self.lidar_max_range = self.get_parameter('lidar_max_range').value
+        self.collision_tol = (self.get_parameter('collision_tol').value)/self.lidar_max_range # normalize collision tolerance to lidar max range
         self.linear_velocity = self.get_parameter('linear_velocity').value
 
         # Parameters for DRL
@@ -141,6 +145,13 @@ class Trainer(Node):
             self.csv_writer.writerow(['Episode', 'Total_Reward', 'Avg_Q_Value', 'Steps'])
         self.episode_q_values = []
         
+        # Start background training thread
+        self.train_step_counter = 0
+        self.memory_lock = threading.Lock()
+        self.train_thread = threading.Thread(target=self.training_loop)
+        self.train_thread.daemon = True
+        self.train_thread.start()
+
         # Log that the trainer was initialized
         self.get_logger().info('Trainer initialized')
 
@@ -157,11 +168,26 @@ class Trainer(Node):
     def update_target_model(self): # function to update the target network with the weights of the main network
         self.target_model.set_weights(self.model.get_weights())
 
-    def train_model(self): # function to train the neural network 
-        if len(self.memory) < self.batch_size: #check if there are enough experiences in the memory to train the network
-            return
+    def training_loop(self):
+        """Continuously train the network in the background"""
+        while rclpy.ok():
+            if not self.is_resetting:
+                with self.memory_lock:
+                    mem_len = len(self.memory)
+                if mem_len >= self.batch_size:
+                    self.train_model()
+                    self.train_step_counter += 1
+                    
+                    if self.train_step_counter % self.target_update_freq == 0:
+                        self.target_model.set_weights(self.model.get_weights())
+                        self.get_logger().info('Target Network Updated!')
+            time.sleep(0.01)
 
-        minibatch = random.sample(self.memory, self.batch_size) # random sample from the memory
+    def train_model(self): # function to train the neural network 
+        with self.memory_lock:
+            if len(self.memory) < self.batch_size: #check if there are enough experiences in the memory to train the network
+                return
+            minibatch = random.sample(list(self.memory), self.batch_size) # random sample from the memory
         states = np.vstack([x[0] for x in minibatch]) # stack the states
         actions = np.array([x[1] for x in minibatch]) # stack the actions
         rewards = np.array([x[2] for x in minibatch]) # stack the rewards
@@ -176,10 +202,6 @@ class Trainer(Node):
         # Predict from target network 
         #next_q_values_target = self.target_model.predict(next_states, verbose=0)
         next_q_values_target = self.target_model(next_states, training=False).numpy()
-        
-        # compute q value with main network and get rewards of previous state 
-        #target_q_values = self.model.predict(states, verbose=0)
-        target_q_values = self.model(states, training=False).numpy()
 
         # apply the formula of the paper (vectorized with NumPy for speed)
         batch_indices = np.arange(self.batch_size)
@@ -191,23 +213,23 @@ class Trainer(Node):
             rewards, # If collision, target is just the reward
             rewards + self.gamma * next_q_values_target[batch_indices, best_next_actions] # Otherwise add discounted future reward
         )
+        updates = tf.convert_to_tensor(updates, dtype=tf.float32)
         
-        # Update the target values for the specific actions taken
-        target_q_values[batch_indices, actions] = updates
-        
-        # #commentare tutto questo
-        # # apply the formula of the paper
-        # for i in range(self.batch_size):
-        #     if dones[i]: 
-        #         # if there was a collision
-        #         target_q_values[i][actions[i]] = rewards[i] 
-        #     else:
-        #         # otherwise add the discounted future reward (gamma)
-        #         target_q_values[i][actions[i]] = rewards[i] + self.gamma * next_q_values_target[i][best_next_actions[i]]
-                
-        # Train the network with the correct values
-        #self.model.fit(states, target_q_values, batch_size=self.batch_size, epochs=1, verbose=0)
-        self.model.train_on_batch(states, target_q_values)
+        # Use GradientTape to compute gradients ONLY for the actions taken
+        with tf.GradientTape() as tape:
+            # Calcola i Q-value attuali per tutte le azioni
+            q_values = self.model(states, training=True)
+            
+            # Estrai solo i Q-value delle azioni che il robot ha effettivamente preso
+            action_indices = tf.stack([batch_indices, actions], axis=1)
+            q_action = tf.gather_nd(q_values, action_indices)
+            
+            # Calcola la loss MSE solo ed esclusivamente tra l'azione presa e il target
+            loss = tf.keras.losses.MSE(updates, q_action)
+            
+        # Applica i gradienti
+        grads = tape.gradient(loss, self.model.trainable_variables)
+        self.model.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
     
     def scan_callback(self, msg: Float32MultiArray):
         """Callback for LiDAR readings"""
@@ -221,7 +243,7 @@ class Trainer(Node):
         req = Empty.Request()
         #self.pause_physics_client.call_async(req) # pause gazebo, it's needed to avoid the robot to move while executing control actions
 
-        self.state = np.array(msg.data)
+        self.state = np.array(msg.data)/self.lidar_max_range
         self.state = self.state.reshape(1, len(self.state)) # reshape the state to be a 2D array instead of a vector
         
         self.control_loop_callback() # execute the control loop 
@@ -244,7 +266,7 @@ class Trainer(Node):
         collision_threshold = self.collision_tol
 
         if min_range < collision_threshold: # if the minimum range is less than the threshold -> collision
-            self.get_logger().warn(f'Collisione rilevata! Min range: {min_range:.3f}m')
+            self.get_logger().warn(f'Collision detected! Min range: {min_range*self.lidar_max_range:.3f}m')
             self.stop_flag = True
             return True
         
@@ -341,7 +363,8 @@ class Trainer(Node):
 
         # 2. Add to the memory this iteration step
         if self.previous_state is not None and self.previous_action is not None:
-            self.memory.append((self.previous_state, self.previous_action, reward, self.state, collision))
+            with self.memory_lock:
+                self.memory.append((self.previous_state, self.previous_action, reward, self.state, collision))
 
         # 3. Reset robot if collision or timeout achieved 
         if self.step_count > 3000 or collision:
@@ -374,12 +397,10 @@ class Trainer(Node):
         # 6. Train the model
         self.previous_state = self.state.copy()
         self.previous_action = m
-        self.train_model()
+        # self.train_model() # Moved to background thread
 
         # 7. Update the neural network
-        if self.total_step_count % self.target_update_freq == 0 and self.total_step_count != 0:
-            self.target_model.set_weights(self.model.get_weights())
-            self.get_logger().info('Target Network Updated!')
+        # Moved to background thread
 
         # 8. Keep track of number of steps
         self.step_count += 1

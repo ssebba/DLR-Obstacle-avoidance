@@ -29,10 +29,23 @@ class Respawner(Node):
 
         self.map_obstacles = self.parse_world_file(pkg_name, world_file)
         if self.map_obstacles:
-            self.map_min_x = min([wx - (sx / 2.0) for wx, wy, sx, sy in self.map_obstacles])
-            self.map_max_x = max([wx + (sx / 2.0) for wx, wy, sx, sy in self.map_obstacles])
-            self.map_min_y = min([wy - (sy / 2.0) for wx, wy, sx, sy in self.map_obstacles])
-            self.map_max_y = max([wy + (sy / 2.0) for wx, wy, sx, sy in self.map_obstacles])
+            map_min_x, map_max_x = float('inf'), float('-inf')
+            map_min_y, map_max_y = float('inf'), float('-inf')
+            for obs in self.map_obstacles:
+                if obs[0] == 'rect':
+                    _, wx, wy, sx, sy = obs
+                    map_min_x = min(map_min_x, wx - sx/2.0)
+                    map_max_x = max(map_max_x, wx + sx/2.0)
+                    map_min_y = min(map_min_y, wy - sy/2.0)
+                    map_max_y = max(map_max_y, wy + sy/2.0)
+                elif obs[0] == 'tri':
+                    _, p1, p2, p3 = obs
+                    map_min_x = min(map_min_x, p1[0], p2[0], p3[0])
+                    map_max_x = max(map_max_x, p1[0], p2[0], p3[0])
+                    map_min_y = min(map_min_y, p1[1], p2[1], p3[1])
+                    map_max_y = max(map_max_y, p1[1], p2[1], p3[1])
+            self.map_min_x, self.map_max_x = map_min_x, map_max_x
+            self.map_min_y, self.map_max_y = map_min_y, map_max_y
             
             self.get_logger().info(f'Computed map limits: X[{self.map_min_x:.2f}, {self.map_max_x:.2f}], Y[{self.map_min_y:.2f}, {self.map_max_y:.2f}]')
         else:
@@ -107,19 +120,8 @@ class Respawner(Node):
                         # Gazebo X = OBJ X, Gazebo Y = -OBJ Z
                         gx = [v[0] for v in t]
                         gy = [-v[2] for v in t]
-                        min_x, max_x = min(gx), max(gx)
-                        min_y, max_y = min(gy), max(gy)
                         
-                        center_x = (min_x + max_x) / 2.0
-                        center_y = (min_y + max_y) / 2.0
-                        size_x = max_x - min_x
-                        size_y = max_y - min_y
-                        
-                        # Add a minimum thickness just in case the triangle edge is perfectly aligned
-                        if size_x < 0.01: size_x = 0.01
-                        if size_y < 0.01: size_y = 0.01
-                        
-                        walls.append((center_x, center_y, size_x, size_y))
+                        walls.append(('tri', (gx[0], gy[0]), (gx[1], gy[1]), (gx[2], gy[2])))
             else:
                 # First extract global offsets from the <state> section
                 model_offsets = {}
@@ -166,7 +168,7 @@ class Respawner(Node):
                             if abs(math.cos(global_yaw)) < 0.5:
                                 sx, sy = sy, sx
                                 
-                            walls.append((world_x, world_y, sx, sy))
+                            walls.append(('rect', world_x, world_y, sx, sy))
                             
             self.get_logger().info(f'Caricati {len(walls)} ostacoli dal file .world')
         except Exception as e:
@@ -175,6 +177,27 @@ class Respawner(Node):
 
     def yaw_to_quaternion(self, yaw):
         return 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+
+    def pt_seg_dist(self, px, py, x1, y1, x2, y2):
+        vx, vy = x2 - x1, y2 - y1
+        wx, wy = px - x1, py - y1
+        c1 = wx * vx + wy * vy
+        if c1 <= 0: return math.hypot(px - x1, py - y1)
+        c2 = vx * vx + vy * vy
+        if c2 == 0: return math.hypot(px - x1, py - y1)
+        if c2 <= c1: return math.hypot(px - x2, py - y2)
+        b = c1 / c2
+        return math.hypot(px - (x1 + b * vx), py - (y1 + b * vy))
+
+    def is_point_in_triangle(self, px, py, p1, p2, p3):
+        def sign(x1, y1, x2, y2, x3, y3):
+            return (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3)
+        d1 = sign(px, py, p1[0], p1[1], p2[0], p2[1])
+        d2 = sign(px, py, p2[0], p2[1], p3[0], p3[1])
+        d3 = sign(px, py, p3[0], p3[1], p1[0], p1[1])
+        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+        return not (has_neg and has_pos)
 
     def get_random_safe_pose(self, margin=0.6, forward_clearance=0.6):
         min_x = self.map_min_x + margin
@@ -213,15 +236,27 @@ class Respawner(Node):
                 current_margin = margin if d == 0.0 else point_margin
 
                 # 2. Verifica collisione con ostacoli
-                for (wx, wy, sx, sy) in self.map_obstacles:
-                    w_min_x = wx - (sx / 2.0) - current_margin
-                    w_max_x = wx + (sx / 2.0) + current_margin
-                    w_min_y = wy - (sy / 2.0) - current_margin
-                    w_max_y = wy + (sy / 2.0) + current_margin
+                for obs in self.map_obstacles:
+                    if obs[0] == 'rect':
+                        _, wx, wy, sx, sy = obs
+                        w_min_x = wx - (sx / 2.0) - current_margin
+                        w_max_x = wx + (sx / 2.0) + current_margin
+                        w_min_y = wy - (sy / 2.0) - current_margin
+                        w_max_y = wy + (sy / 2.0) + current_margin
 
-                    if (w_min_x < check_x < w_max_x) and (w_min_y < check_y < w_max_y):
-                        is_safe = False
-                        break 
+                        if (w_min_x < check_x < w_max_x) and (w_min_y < check_y < w_max_y):
+                            is_safe = False
+                            break
+                    elif obs[0] == 'tri':
+                        _, p1, p2, p3 = obs
+                        if self.is_point_in_triangle(check_x, check_y, p1, p2, p3):
+                            is_safe = False
+                            break
+                        if self.pt_seg_dist(check_x, check_y, p1[0], p1[1], p2[0], p2[1]) < current_margin or \
+                           self.pt_seg_dist(check_x, check_y, p2[0], p2[1], p3[0], p3[1]) < current_margin or \
+                           self.pt_seg_dist(check_x, check_y, p3[0], p3[1], p1[0], p1[1]) < current_margin:
+                            is_safe = False
+                            break
                 
                 if not is_safe:
                     break 
@@ -242,7 +277,7 @@ class Respawner(Node):
 
         # Invia la richiesta a Gazebo tramite comando da terminale,
         # aggirando il bug del servizio ROS 2 /set_entity_state in Humble
-        cmd = f"gz model -m {self.robot_name} -x {px:.3f} -y {py:.3f} -z 0.05 -Y {yaw:.3f}"
+        cmd = f"gz model -m {self.robot_name} -x {px:.3f} -y {py:.3f} -z 0.01 -R 0.0 -P 0.0 -Y {yaw:.3f}"
         os.system(cmd)
 
         response.success = True
