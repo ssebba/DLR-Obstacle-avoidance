@@ -27,12 +27,14 @@ class Controller(Node):
         super().__init__('controller')
         
         # Node parameters
-        self.declare_parameter('control_frequency', 10) 
-        self.declare_parameter('collision_tol', 0.20)  # 15-25 cm
+        self.declare_parameter('control_frequency', 100) 
+        self.declare_parameter('collision_tol', 0.15)  # 15-25 cm
         self.declare_parameter('linear_velocity',0.2) # define constant linear speed
+        self.declare_parameter('lidar_max_range',5.0)
 
         self.control_freq = self.get_parameter('control_frequency').value
-        self.collision_tol = self.get_parameter('collision_tol').value
+        self.lidar_max_range = self.get_parameter('lidar_max_range').value
+        self.collision_tol = self.get_parameter('collision_tol').value/self.lidar_max_range
         self.linear_velocity = self.get_parameter('linear_velocity').value
 
         # Subscribers
@@ -65,7 +67,7 @@ class Controller(Node):
         self.feedback_rate = 50
 
         # load trained model
-        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/trained_model_FINAL.h5')
+        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/trained_model_FINAL.keras')
 
         self.navigation_active = True
         self.stop_flag = False
@@ -76,7 +78,7 @@ class Controller(Node):
     
     def scan_callback(self, msg: Float32MultiArray):
         """Callback for LiDAR readings"""
-        self.state = np.array(msg.data)
+        self.state = np.array(msg.data) / self.lidar_max_range
         self.state = self.state.reshape(1, len(self.state))
     
     # def odom_callback(self, msg: Odometry):
@@ -96,11 +98,6 @@ class Controller(Node):
     #     w = msg.twist.twist.angular.z
     #     self.robot_vel = np.array([v, w])
     
-
-    
-
-
-    
     
     def check_collision(self, distances) -> bool:
         """
@@ -117,15 +114,12 @@ class Controller(Node):
         collision_threshold = self.collision_tol
 
         if min_range < collision_threshold:
-            self.get_logger().warn(f'Collisione rilevata! Min range: {min_range:.3f}m')
+            self.get_logger().warn(f'Collisione rilevata! Min range: {min_range*self.lidar_max_range:.3f}m')
             self.stop_flag = True
             return True
         
         return False
         
-
-
-
 
     def control_loop_callback(self):
         """
