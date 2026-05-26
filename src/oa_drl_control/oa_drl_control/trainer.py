@@ -53,19 +53,19 @@ if gpus:
 ACTION_SIZE            = 11      # number of discrete angular-velocity actions
 NUM_LIDAR_RANGES       = 50      # pre-processed LIDAR readings  (input dim)
 LIDAR_MAX_RANGE        = 5.0     # sensor max range, metres
-LINEAR_VELOCITY        = 0.6     # constant forward speed, m/s
+LINEAR_VELOCITY        = 0.2     # constant forward speed, m/s
 EPSILON_INITIAL        = 1.0     # starting ε for ε-greedy exploration
 EPSILON_MIN            = 0.05    # minimum ε                       (paper §3.3)
 BETA                   = 0.999   # ε decay rate per episode (paper §5.2 best)
 REWARD_SAFE            = 5       # reward per step w/o collision    (paper Eq. 4)
 REWARD_COLLISION       = -1000   # penalty on collision             (paper Eq. 4)
 MAX_EPOCHS             = 3000    # total training episodes          (paper §3.4)
-MAX_STEPS_PER_EPISODE  = 600    # env steps before episode timeout
+MAX_STEPS_PER_EPISODE  = 1800    # env steps before episode timeout
 HIDDEN_UNITS           = 300     # neurons per hidden layer         (paper §3.4)
-COLLISION_TOL          = 0.25    # collision distance threshold, metres
+COLLISION_TOL          = 0.2    # collision distance threshold, metres
 
 # ── Training-control parameters ────────────────────────────────────────────────
-PATIENCE               = 3000     # episodes without Q-improvement → early stop
+PATIENCE               = 300000     # episodes without Q-improvement → early stop
 BEST_MODEL_WINDOW      = 50      # moving-average window for smoothed-Q metric
 MEMORY_SIZE            = 100000  # experience replay buffer capacity
 

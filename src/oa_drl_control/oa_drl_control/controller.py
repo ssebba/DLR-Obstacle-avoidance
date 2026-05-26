@@ -1,6 +1,5 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.timer import Timer
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
@@ -27,12 +26,10 @@ class Controller(Node):
         super().__init__('controller')
         
         # Node parameters
-        self.declare_parameter('control_frequency', 100) 
         self.declare_parameter('collision_tol', 0.15)  # 15-25 cm
         self.declare_parameter('linear_velocity',0.2) # define constant linear speed
         self.declare_parameter('lidar_max_range',5.0)
 
-        self.control_freq = self.get_parameter('control_frequency').value
         self.lidar_max_range = self.get_parameter('lidar_max_range').value
         self.collision_tol = self.get_parameter('collision_tol').value/self.lidar_max_range
         self.linear_velocity = self.get_parameter('linear_velocity').value
@@ -59,15 +56,13 @@ class Controller(Node):
             10
         )
 
-        # Timer for the control loop
-        self.timer = self.create_timer(1/self.control_freq, self.control_loop_callback)
-        
+
         # Metrics and state
         self.step_count = 0
         self.feedback_rate = 50
 
         # load trained model
-        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/trained_model_FINAL.keras')
+        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/trained_model_FINAL_25_05.keras')
 
         self.navigation_active = True
         self.stop_flag = False
@@ -80,6 +75,7 @@ class Controller(Node):
         """Callback for LiDAR readings"""
         self.state = np.array(msg.data) / self.lidar_max_range
         self.state = self.state.reshape(1, len(self.state))
+        self.control_loop_callback()
     
     # def odom_callback(self, msg: Odometry):
     #     """Callback for robot odometry"""
@@ -141,13 +137,13 @@ class Controller(Node):
 
         
         # 5. Verify timeout
-        if self.step_count > 300 or self.timeout_flag:
+        if self.timeout_flag:
             self.stop_robot()
             self.timeout_flag = True
             self.get_logger().warn('Task fallito: TIMEOUT')
             return
         
-        q_values = self.model.predict(self.state, verbose=0)
+        q_values = self.model(self.state, training=False).numpy()
         # 3. Policy Greedy: Seleziona l'azione con il valore Q massimo 
         # Restituisce l'indice 'm' compreso tra 0 e 10
         m = np.argmax(q_values[0])

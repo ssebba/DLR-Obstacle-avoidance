@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, Empty
 from gazebo_msgs.srv import SetEntityState
 import xml.etree.ElementTree as ET
 import os
@@ -55,6 +55,7 @@ class Respawner(Node):
 
         self.cb_group = ReentrantCallbackGroup()
         self.set_state_client = self.create_client(SetEntityState, '/set_entity_state', callback_group=self.cb_group)
+        self.reset_world_client = self.create_client(Empty, '/reset_world', callback_group=self.cb_group)
         self.srv = self.create_service(Trigger, '/randomize_robot_pose', self.handle_randomize_pose, callback_group=self.cb_group)
 
         self.csv_filepath = Path.home() / "ros_ws" / "models" / "valid_poses.csv"
@@ -65,6 +66,7 @@ class Respawner(Node):
                 writer.writerow(['x', 'y', 'yaw'])
             self.get_logger().info(f'Created new CSV for the poses: {self.csv_filepath}')
 
+        self._generate_valid_poses()
         self.get_logger().info('Respawner initialized.')
 
     def parse_world_file(self, package_name, world_file_name):
@@ -199,98 +201,103 @@ class Respawner(Node):
         has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
         return not (has_neg and has_pos)
 
-    def get_random_safe_pose(self, margin=0.6, forward_clearance=1.5):
-        min_x = self.map_min_x + margin
-        max_x = self.map_max_x - margin
-        min_y = self.map_min_y + margin
-        max_y = self.map_max_y - margin
+    def _is_pose_safe(self, px, py, yaw, margin, forward_clearance):
+        # 1. Check robot center first (d = 0.0) with full margin
+        if not (self.map_min_x < px < self.map_max_x and 
+                self.map_min_y < py < self.map_max_y):
+            return False
 
+        for obs in self.map_obstacles:
+            if obs[0] == 'rect':
+                _, wx, wy, sx, sy = obs
+                w_min_x = wx - (sx / 2.0) - margin
+                w_max_x = wx + (sx / 2.0) + margin
+                w_min_y = wy - (sy / 2.0) - margin
+                w_max_y = wy + (sy / 2.0) + margin
+                if (w_min_x < px < w_max_x) and (w_min_y < py < w_max_y):
+                    return False
+            elif obs[0] == 'tri':
+                _, p1, p2, p3 = obs
+                if self.is_point_in_triangle(px, py, p1, p2, p3):
+                    return False
+                if self.pt_seg_dist(px, py, p1[0], p1[1], p2[0], p2[1]) < margin or \
+                   self.pt_seg_dist(px, py, p2[0], p2[1], p3[0], p3[1]) < margin or \
+                   self.pt_seg_dist(px, py, p3[0], p3[1], p1[0], p1[1]) < margin:
+                    return False
+
+        # 2. Check forward clearance cone (d > 0.0) with point_margin
         steps = 5
         check_distances = [forward_clearance * (i / steps) for i in range(1, steps + 1)]
         check_angles = [0.0, -0.25, 0.25]  # check a 30-degree cone in front of the robot
-
-        # Margine ridotto per i punti proiettati in avanti (ingombro del robot)
         point_margin = 0.20 
 
-        while True:
-            px = random.uniform(min_x, max_x)
-            py = random.uniform(min_y, max_y)
-            yaw = random.uniform(-math.pi, math.pi)
+        for angle_offset in check_angles:
+            angle = yaw + angle_offset
+            for d in check_distances:
+                check_x = px + d * math.cos(angle)
+                check_y = py + d * math.sin(angle)
 
-            is_safe = True
+                # Verifica limiti mappa
+                if not (self.map_min_x < check_x < self.map_max_x and 
+                        self.map_min_y < check_y < self.map_max_y):
+                    return False
 
-            # 1. Check robot center first (d = 0.0) with full margin
-            if not (self.map_min_x < px < self.map_max_x and 
-                    self.map_min_y < py < self.map_max_y):
-                continue
+                # Verifica collisione ostacoli
+                for obs in self.map_obstacles:
+                    if obs[0] == 'rect':
+                        _, wx, wy, sx, sy = obs
+                        w_min_x = wx - (sx / 2.0) - point_margin
+                        w_max_x = wx + (sx / 2.0) + point_margin
+                        w_min_y = wy - (sy / 2.0) - point_margin
+                        w_max_y = wy + (sy / 2.0) + point_margin
+                        if (w_min_x < check_x < w_max_x) and (w_min_y < check_y < w_max_y):
+                            return False
+                    elif obs[0] == 'tri':
+                        _, p1, p2, p3 = obs
+                        if self.is_point_in_triangle(check_x, check_y, p1, p2, p3):
+                            return False
+                        if self.pt_seg_dist(check_x, check_y, p1[0], p1[1], p2[0], p2[1]) < point_margin or \
+                           self.pt_seg_dist(check_x, check_y, p2[0], p2[1], p3[0], p3[1]) < point_margin or \
+                           self.pt_seg_dist(check_x, check_y, p3[0], p3[1], p1[0], p1[1]) < point_margin:
+                            return False
+        return True
 
-            for obs in self.map_obstacles:
-                if obs[0] == 'rect':
-                    _, wx, wy, sx, sy = obs
-                    w_min_x = wx - (sx / 2.0) - margin
-                    w_max_x = wx + (sx / 2.0) + margin
-                    w_min_y = wy - (sy / 2.0) - margin
-                    w_max_y = wy + (sy / 2.0) + margin
-                    if (w_min_x < px < w_max_x) and (w_min_y < py < w_max_y):
-                        is_safe = False
-                        break
-                elif obs[0] == 'tri':
-                    _, p1, p2, p3 = obs
-                    if self.is_point_in_triangle(px, py, p1, p2, p3):
-                        is_safe = False
-                        break
-                    if self.pt_seg_dist(px, py, p1[0], p1[1], p2[0], p2[1]) < margin or \
-                       self.pt_seg_dist(px, py, p2[0], p2[1], p3[0], p3[1]) < margin or \
-                       self.pt_seg_dist(px, py, p3[0], p3[1], p1[0], p1[1]) < margin:
-                        is_safe = False
-                        break
+    def _generate_valid_poses(self):
+        self.valid_poses = []
+        res = 0.2
+        margin = self.margin
+        forward_clearance = 1.5
+        
+        x = self.map_min_x + margin
+        while x <= self.map_max_x - margin:
+            y = self.map_min_y + margin
+            while y <= self.map_max_y - margin:
+                for yaw_idx in range(8):
+                    yaw = yaw_idx * (math.pi / 4.0)
+                    if self._is_pose_safe(x, y, yaw, margin, forward_clearance):
+                        self.valid_poses.append((x, y, yaw))
+                y += res
+            x += res
+            
+        if not self.valid_poses:
+            self.get_logger().warn("Nessuna posa valida trovata! Uso posa di default (0,0,0)")
+            self.valid_poses.append((0.0, 0.0, 0.0))
+        else:
+            self.get_logger().info(f"Pre-calcolate {len(self.valid_poses)} pose valide sulla griglia.")
 
-            if not is_safe:
-                continue
-
-            # 2. Check forward clearance cone (d > 0.0) with point_margin
-            for angle_offset in check_angles:
-                angle = yaw + angle_offset
-                for d in check_distances:
-                    check_x = px + d * math.cos(angle)
-                    check_y = py + d * math.sin(angle)
-
-                    # Verifica limiti mappa
-                    if not (self.map_min_x < check_x < self.map_max_x and 
-                            self.map_min_y < check_y < self.map_max_y):
-                        is_safe = False
-                        break
-
-                    # Verifica collisione ostacoli
-                    for obs in self.map_obstacles:
-                        if obs[0] == 'rect':
-                            _, wx, wy, sx, sy = obs
-                            w_min_x = wx - (sx / 2.0) - point_margin
-                            w_max_x = wx + (sx / 2.0) + point_margin
-                            w_min_y = wy - (sy / 2.0) - point_margin
-                            w_max_y = wy + (sy / 2.0) + point_margin
-                            if (w_min_x < check_x < w_max_x) and (w_min_y < check_y < w_max_y):
-                                is_safe = False
-                                break
-                        elif obs[0] == 'tri':
-                            _, p1, p2, p3 = obs
-                            if self.is_point_in_triangle(check_x, check_y, p1, p2, p3):
-                                is_safe = False
-                                break
-                            if self.pt_seg_dist(check_x, check_y, p1[0], p1[1], p2[0], p2[1]) < point_margin or \
-                               self.pt_seg_dist(check_x, check_y, p2[0], p2[1], p3[0], p3[1]) < point_margin or \
-                               self.pt_seg_dist(check_x, check_y, p3[0], p3[1], p1[0], p1[1]) < point_margin:
-                                is_safe = False
-                                break
-                    
-                    if not is_safe:
-                        break
-                
-                if not is_safe:
-                    break
-
-            if is_safe:
-                return px, py, yaw
+    def get_random_safe_pose(self, margin=0.6, forward_clearance=1.5):
+        px, py, yaw = random.choice(self.valid_poses)
+        
+        # Add small random noise to prevent spawning exactly on grid points
+        px += random.uniform(-0.01, 0.01)
+        py += random.uniform(-0.01, 0.01)
+        yaw += random.uniform(-0.01, 0.01)
+        
+        # Ensure yaw stays in [-pi, pi]
+        if yaw > math.pi: yaw -= 2 * math.pi
+        elif yaw < -math.pi: yaw += 2 * math.pi
+            
+        return px, py, yaw
 
 
     def handle_randomize_pose(self, request, response):
@@ -306,7 +313,10 @@ class Respawner(Node):
 
         # Prima di muovere il robot, resettiamo il mondo (velocità e pose).
         # Questo garantisce che la velocità inerziale residua diventi esattamente zero.
-        os.system("ros2 service call /reset_world std_srvs/srv/Empty > /dev/null 2>&1")
+        if self.reset_world_client.wait_for_service(timeout_sec=0.5):
+            self.reset_world_client.call_async(Empty.Request())
+        else:
+            self.get_logger().warn("Servizio /reset_world non disponibile. Salto il reset inerziale.")
 
         # Invia la richiesta a Gazebo tramite comando da terminale,
         # aggirando il bug del servizio ROS 2 /set_entity_state in Humble
