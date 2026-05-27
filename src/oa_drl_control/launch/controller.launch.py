@@ -34,7 +34,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     x_pose = LaunchConfiguration('x_pose', default='-5.0')
     y_pose = LaunchConfiguration('y_pose', default='3.5')
-    lidar_rate = LaunchConfiguration('lidar_rate', default='30')
+    lidar_rate = LaunchConfiguration('lidar_rate', default='33')
 
     world = os.path.join(
         get_package_share_directory('oa_drl_control'),
@@ -86,7 +86,7 @@ def generate_launch_description():
 
     # Add the commands to the launch description
     ld.add_action(gzserver_cmd)
-    ld.add_action(gzclient_cmd)
+    #ld.add_action(gzclient_cmd)
     ld.add_action(robot_state_publisher_cmd)
     ld.add_action(spawn_turtlebot_cmd)
 

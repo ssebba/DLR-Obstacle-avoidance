@@ -20,12 +20,19 @@ class Respawner(Node):
         self.declare_parameter('package_name', 'oa_drl_control')
         self.declare_parameter('world_file', 'training_env.world')
         self.declare_parameter('robot_name', 'burger')
+        # margin: distanza minima dai muri per il centro del robot [m]
+        # (deve essere >= collision_tolerance del trainer, di default 0.4 = 2x la tolleranza)
         self.declare_parameter('margin', 0.4)
+        # forward_clearance: spazio libero che deve esserci davanti al robot [m]
+        # Fisicamente: r_min = v_lin / omega_max = 0.2/0.8 = 0.25 m
+        # Con collision_tolerance=0.2 m e safety buffer: 0.25 + 0.2 + 0.15 ≈ 0.6 m
+        self.declare_parameter('forward_clearance', 0.6)
 
         pkg_name = self.get_parameter('package_name').value
         world_file = self.get_parameter('world_file').value
         self.robot_name = self.get_parameter('robot_name').value
         self.margin = self.get_parameter('margin').value
+        self.forward_clearance = self.get_parameter('forward_clearance').value
 
         self.map_obstacles = self.parse_world_file(pkg_name, world_file)
         if self.map_obstacles:
@@ -262,42 +269,94 @@ class Respawner(Node):
                             return False
         return True
 
-    def _generate_valid_poses(self):
-        self.valid_poses = []
+    def _generate_valid_positions(self):
+        """Pre-calcola solo le posizioni (x,y) sicure rispetto ai muri (controllo margine).
+        L'angolo non viene incluso qui: verrà campionato casualmente al momento del respawn.
+        Questo produce molte più posizioni valide e angoli veramente continui."""
+        self.valid_positions = []
         res = 0.2
         margin = self.margin
-        forward_clearance = 1.5
-        
+
+        self.get_logger().info(
+            f'Generazione pose: margin={margin:.2f} m, '
+            f'forward_clearance={self.forward_clearance:.2f} m')
+
         x = self.map_min_x + margin
         while x <= self.map_max_x - margin:
             y = self.map_min_y + margin
             while y <= self.map_max_y - margin:
-                for yaw_idx in range(8):
-                    yaw = yaw_idx * (math.pi / 4.0)
-                    if self._is_pose_safe(x, y, yaw, margin, forward_clearance):
-                        self.valid_poses.append((x, y, yaw))
+                if self._is_position_safe(x, y, margin):
+                    self.valid_positions.append((x, y))
                 y += res
             x += res
-            
-        if not self.valid_poses:
-            self.get_logger().warn("Nessuna posa valida trovata! Uso posa di default (0,0,0)")
-            self.valid_poses.append((0.0, 0.0, 0.0))
-        else:
-            self.get_logger().info(f"Pre-calcolate {len(self.valid_poses)} pose valide sulla griglia.")
 
-    def get_random_safe_pose(self, margin=0.6, forward_clearance=1.5):
-        px, py, yaw = random.choice(self.valid_poses)
-        
-        # Add small random noise to prevent spawning exactly on grid points
-        px += random.uniform(-0.01, 0.01)
-        py += random.uniform(-0.01, 0.01)
-        yaw += random.uniform(-0.01, 0.01)
-        
-        # Ensure yaw stays in [-pi, pi]
-        if yaw > math.pi: yaw -= 2 * math.pi
-        elif yaw < -math.pi: yaw += 2 * math.pi
-            
-        return px, py, yaw
+        if not self.valid_positions:
+            self.get_logger().warn("Nessuna posizione valida trovata! Uso posizione di default (0,0)")
+            self.valid_positions.append((0.0, 0.0))
+        else:
+            self.get_logger().info(f"Pre-calcolate {len(self.valid_positions)} posizioni valide sulla griglia.")
+
+    def _is_position_safe(self, px, py, margin):
+        """Controlla solo che (px, py) sia dentro la mappa e lontana dai muri (no angolo)."""
+        if not (self.map_min_x < px < self.map_max_x and
+                self.map_min_y < py < self.map_max_y):
+            return False
+        for obs in self.map_obstacles:
+            if obs[0] == 'rect':
+                _, wx, wy, sx, sy = obs
+                if (wx - sx/2.0 - margin < px < wx + sx/2.0 + margin) and \
+                   (wy - sy/2.0 - margin < py < wy + sy/2.0 + margin):
+                    return False
+            elif obs[0] == 'tri':
+                _, p1, p2, p3 = obs
+                if self.is_point_in_triangle(px, py, p1, p2, p3):
+                    return False
+                if self.pt_seg_dist(px, py, p1[0], p1[1], p2[0], p2[1]) < margin or \
+                   self.pt_seg_dist(px, py, p2[0], p2[1], p3[0], p3[1]) < margin or \
+                   self.pt_seg_dist(px, py, p3[0], p3[1], p1[0], p1[1]) < margin:
+                    return False
+        return True
+
+    # Kept for backward-compatibility; now delegates to _generate_valid_positions.
+    def _generate_valid_poses(self):
+        self._generate_valid_positions()
+
+    def get_random_safe_pose(self, margin=None, forward_clearance=None, max_angle_attempts=36):
+        """Sceglie una posizione valida a caso dalla lista pre-calcolata, poi campiona
+        un angolo casuale continuo che garantisce la forward clearance.
+        Se nessun angolo funziona per quella posizione, riprova con un'altra.
+
+        Args:
+            margin: distanza minima dai muri [m]. None → usa il parametro ROS 'margin'.
+            forward_clearance: spazio libero frontale richiesto [m]. None → usa il parametro ROS 'forward_clearance'.
+            max_angle_attempts: quanti angoli casuali provare per ogni posizione.
+        """
+        if margin is None:
+            margin = self.margin
+        if forward_clearance is None:
+            forward_clearance = self.forward_clearance
+
+        # Mescola la lista per non ciclare sempre nello stesso ordine
+        positions = list(self.valid_positions)
+        random.shuffle(positions)
+
+        for px, py in positions:
+            # Aggiungi un piccolo jitter alla posizione per uscire dalla griglia
+            jitter = 0.05
+            px += random.uniform(-jitter, jitter)
+            py += random.uniform(-jitter, jitter)
+
+            # Campiona angoli random nell'intero cerchio [0, 2π)
+            yaw_candidates = [random.uniform(-math.pi, math.pi)
+                              for _ in range(max_angle_attempts)]
+
+            for yaw in yaw_candidates:
+                if self._is_pose_safe(px, py, yaw, margin, forward_clearance):
+                    return px, py, yaw
+
+        # Fallback: posizione di default
+        self.get_logger().warn("get_random_safe_pose: nessuna posa trovata, uso (0,0,0)")
+        return 0.0, 0.0, 0.0
 
 
     def handle_randomize_pose(self, request, response):

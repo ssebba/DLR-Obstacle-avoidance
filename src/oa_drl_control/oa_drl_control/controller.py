@@ -26,7 +26,7 @@ class Controller(Node):
         super().__init__('controller')
         
         # Node parameters
-        self.declare_parameter('collision_tol', 0.15)  # 15-25 cm
+        self.declare_parameter('collision_tol', 0.2)  # 15-25 cm
         self.declare_parameter('linear_velocity',0.2) # define constant linear speed
         self.declare_parameter('lidar_max_range',5.0)
 

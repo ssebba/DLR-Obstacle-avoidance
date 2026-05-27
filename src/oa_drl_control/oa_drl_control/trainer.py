@@ -56,26 +56,26 @@ LIDAR_MAX_RANGE        = 5.0     # sensor max range, metres
 LINEAR_VELOCITY        = 0.2     # constant forward speed, m/s
 EPSILON_INITIAL        = 1.0     # starting ε for ε-greedy exploration
 EPSILON_MIN            = 0.05    # minimum ε                       (paper §3.3)
-BETA                   = 0.999   # ε decay rate per episode (paper §5.2 best)
+BETA                   = 0.9994   # ε decay rate per episode (paper §5.2 best)
 REWARD_SAFE            = 5       # reward per step w/o collision    (paper Eq. 4)
 REWARD_COLLISION       = -1000   # penalty on collision             (paper Eq. 4)
-MAX_EPOCHS             = 3000    # total training episodes          (paper §3.4)
+MAX_EPOCHS             = 5000    # total training episodes          (paper §3.4)
 MAX_STEPS_PER_EPISODE  = 1800    # env steps before episode timeout
 HIDDEN_UNITS           = 300     # neurons per hidden layer         (paper §3.4)
 COLLISION_TOL          = 0.2    # collision distance threshold, metres
 
 # ── Training-control parameters ────────────────────────────────────────────────
-PATIENCE               = 300000     # episodes without Q-improvement → early stop
-BEST_MODEL_WINDOW      = 50      # moving-average window for smoothed-Q metric
+PATIENCE               = 300000     # episodes without reward improvement → early stop
+BEST_MODEL_WINDOW      = 50      # moving-average window for smoothed reward metric
 MEMORY_SIZE            = 100000  # experience replay buffer capacity
 
 # ── Model selection ─────────────────────────────────────────────────────────────
 RUN_MODEL_SELECTION          = False  # False → skip and use defaults below
-SELECTION_EPOCHS             = 500   # episodes per candidate (shorter trial run)
+SELECTION_EPOCHS             = 1000   # episodes per candidate (shorter trial run)
 
 # Search grids — add more values to expand the search space
 GAMMA_CANDIDATES              = [0.95, 0.97, 0.99]    # discount factor γ
-LR_CANDIDATES                 = [0.0005, 0.001, 0.002] # Adam learning rate α
+LR_CANDIDATES                 = [0.0005, 0.001] # Adam learning rate α
 BATCH_SIZE_CANDIDATES         = [256]    # mini-batch size   (e.g. [64, 128, 256])
 TARGET_UPDATE_FREQ_CANDIDATES = [1000]   # target-net update period in env steps
                                          # (e.g. [500, 1000, 5000])
@@ -211,7 +211,7 @@ class Trainer(Node):
         self.epsilon             = EPSILON_INITIAL
         self.epoch_count         = 1
         self.env_step_count      = 0
-        self.candidate_q_history = deque(maxlen=BEST_MODEL_WINDOW)
+        self.candidate_reward_history = deque(maxlen=BEST_MODEL_WINDOW)
 
         # Reset episode-level state (is_resetting is managed by reset_done_callback)
         self.step_count      = 0
@@ -231,15 +231,15 @@ class Trainer(Node):
 
     def _finish_candidate(self):
         """Score the current candidate and move to the next (or to training)."""
-        score = (float(np.mean(self.candidate_q_history))
-                 if self.candidate_q_history else -float('inf'))
+        score = (float(np.mean(self.candidate_reward_history))
+                 if self.candidate_reward_history else -float('inf'))
 
         params = self.candidates[self.candidate_idx]
         self.selection_results.append({'params': params, 'score': score})
 
         self.get_logger().info(
             f'  ✓ Candidate {self.candidate_idx + 1}/{len(self.candidates)} done. '
-            f'Smoothed avg-Q score = {score:.4f}'
+            f'Smoothed avg-reward score = {score:.2f}'
         )
 
         self.candidate_idx += 1
@@ -308,10 +308,10 @@ class Trainer(Node):
                     meta = json.load(f)
                 self.epoch_count = meta.get('epoch_count', 1)
                 self.epsilon     = meta.get('epsilon', EPSILON_INITIAL)
-                self.best_avg_q  = meta.get('best_avg_q', -float('inf'))
+                self.best_avg_reward = meta.get('best_avg_reward', -float('inf'))
                 self.get_logger().info(
                     f'  Resumed: episode={self.epoch_count}, '
-                    f'epsilon={self.epsilon:.3f}, best_q={self.best_avg_q:.4f}'
+                    f'epsilon={self.epsilon:.3f}, best_reward={self.best_avg_reward:.2f}'
                 )
             else:
                 self.epoch_count = 1
@@ -325,13 +325,13 @@ class Trainer(Node):
             self._update_target_model()
             self.epoch_count  = 1
             self.epsilon      = EPSILON_INITIAL
-            self.best_avg_q   = -float('inf')
+            self.best_avg_reward = -float('inf')
             mode = 'w'
 
         self.memory           = deque(maxlen=MEMORY_SIZE)
         self.env_step_count   = 0
         self.patience_counter = 0
-        self.recent_avg_q     = deque(maxlen=BEST_MODEL_WINDOW)
+        self.recent_avg_reward = deque(maxlen=BEST_MODEL_WINDOW)
         self.best_model_path  = Path.home() / 'ros_ws' / 'models' / 'best_model.keras'
 
         # Reset episode state (is_resetting managed by reset_done_callback)
@@ -351,7 +351,7 @@ class Trainer(Node):
         if mode == 'w' or not file_exists:
             self.csv_writer.writerow([
                 'Episode', 'Total_Reward', 'Avg_Q_Value',
-                'Steps', 'Smoothed_Q', 'Best_Q', 'Patience_Counter'
+                'Steps', 'Smoothed_Reward', 'Best_Reward', 'Patience_Counter'
             ])
 
         self.get_logger().info(
@@ -575,8 +575,8 @@ class Trainer(Node):
         ])
         self.csv_file.flush()
 
-        # Track avg-Q for candidate scoring
-        self.candidate_q_history.append(avg_q)
+        # Track episode reward for candidate scoring (last BEST_MODEL_WINDOW episodes)
+        self.candidate_reward_history.append(self.episode_reward)
 
         # Decay ε (paper Eq. 3: ε_{k+1} = β * ε_k)
         if self.epsilon > EPSILON_MIN:
@@ -592,27 +592,28 @@ class Trainer(Node):
 
     def _on_training_episode_end(self, avg_q: float):
         """Log episode, track best model, check patience and termination."""
-        self.recent_avg_q.append(avg_q)
-        smoothed_q = float(np.mean(self.recent_avg_q))
+        self.recent_avg_reward.append(self.episode_reward)
+        smoothed_reward = float(np.mean(self.recent_avg_reward))
 
-        # CSV log
+        # CSV log — Total_Reward and Avg_Q_Value are kept for analysis;
+        # Smoothed_Reward / Best_Reward drive best-model selection.
         self.csv_writer.writerow([
             self.epoch_count, self.episode_reward, avg_q,
-            self.step_count, smoothed_q, self.best_avg_q, self.patience_counter
+            self.step_count, smoothed_reward, self.best_avg_reward, self.patience_counter
         ])
         self.csv_file.flush()
 
-        # ── Best-model checkpoint (not every N epochs — only on improvement) ───
-        if len(self.recent_avg_q) < self.recent_avg_q.maxlen:
-            # Warmup: not enough data for a reliable smoothed-Q estimate yet
+        # ── Best-model checkpoint (only when smoothed reward improves) ──────────
+        if len(self.recent_avg_reward) < self.recent_avg_reward.maxlen:
+            # Warmup: not enough data for a reliable smoothed-reward estimate yet
             pass
-        elif smoothed_q > self.best_avg_q:
-            self.best_avg_q       = smoothed_q
+        elif smoothed_reward > self.best_avg_reward:
+            self.best_avg_reward  = smoothed_reward
             self.patience_counter = 0
             self.model.save(self.best_model_path)
             self.get_logger().info(
                 f'★ Best model saved! Episode {self.epoch_count}, '
-                f'smoothed Q = {smoothed_q:.4f}'
+                f'smoothed reward = {smoothed_reward:.2f}'
             )
         else:
             self.patience_counter += 1
@@ -628,13 +629,13 @@ class Trainer(Node):
             self.model.save(ckpt_path)
             with open(meta_path, 'w') as f:
                 json.dump({
-                    'epoch_count': self.epoch_count,
-                    'epsilon':     self.epsilon,
-                    'best_avg_q':  self.best_avg_q,
+                    'epoch_count':     self.epoch_count,
+                    'epsilon':         self.epsilon,
+                    'best_avg_reward': self.best_avg_reward,
                 }, f)
             self.get_logger().info(
                 f'Checkpoint saved — episode {self.epoch_count}, '
-                f'ε={self.epsilon:.3f}, best_Q={self.best_avg_q:.4f}'
+                f'ε={self.epsilon:.3f}, best_reward={self.best_avg_reward:.2f}'
             )
 
         self.epoch_count += 1
@@ -643,8 +644,8 @@ class Trainer(Node):
         if self.patience_counter >= PATIENCE:
             self.get_logger().warn(
                 f'Early stopping at episode {self.epoch_count - 1}: '
-                f'no Q-improvement for {PATIENCE} episodes. '
-                f'Best smoothed Q = {self.best_avg_q:.4f}'
+                f'no reward improvement for {PATIENCE} episodes. '
+                f'Best smoothed reward = {self.best_avg_reward:.2f}'
             )
             self._terminate_training()
 
@@ -652,7 +653,7 @@ class Trainer(Node):
         if self.epoch_count > MAX_EPOCHS:
             self.get_logger().info(
                 f'Training complete after {MAX_EPOCHS} episodes. '
-                f'Best smoothed Q = {self.best_avg_q:.4f}'
+                f'Best smoothed reward = {self.best_avg_reward:.2f}'
             )
             self._terminate_training()
 
@@ -664,9 +665,9 @@ class Trainer(Node):
         self.model.save(final_path)
         with open(meta_path, 'w') as f:
             json.dump({
-                'epoch_count': self.epoch_count,
-                'epsilon':     self.epsilon,
-                'best_avg_q':  self.best_avg_q,
+                'epoch_count':     self.epoch_count,
+                'epsilon':         self.epsilon,
+                'best_avg_reward': self.best_avg_reward,
             }, f)
 
         self.get_logger().info(
@@ -674,7 +675,7 @@ class Trainer(Node):
             f'  TRAINING TERMINATED\n'
             f'  Last-epoch model → {final_path}\n'
             f'  Best model       → {self.best_model_path}\n'
-            f'  Best smoothed Q  = {self.best_avg_q:.4f}\n'
+            f'  Best smoothed reward = {self.best_avg_reward:.2f}\n'
             f'{"=" * 60}'
         )
 
