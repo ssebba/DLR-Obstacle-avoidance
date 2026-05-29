@@ -62,7 +62,7 @@ class Controller(Node):
         self.feedback_rate = 50
 
         # load trained model
-        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/trained_model_FINAL_25_05.keras')
+        self.model = tf.keras.models.load_model('/home/seba/ros_ws/models/trained_model_FINAL.keras')
 
         self.navigation_active = True
         self.stop_flag = False

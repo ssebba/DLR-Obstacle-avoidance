@@ -12,3 +12,8 @@ src/turtlebot3_perception/
 models/
 __pycache__/
 *.pyc
+paper.pdf
+paper_extra.pdf
+*.md
+plot_training.py
+src/turtlebot3_simulations

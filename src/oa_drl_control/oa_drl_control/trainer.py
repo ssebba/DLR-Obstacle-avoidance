@@ -59,14 +59,14 @@ EPSILON_MIN            = 0.05    # minimum ε                       (paper §3.3
 BETA                   = 0.9994   # ε decay rate per episode (paper §5.2 best)
 REWARD_SAFE            = 5       # reward per step w/o collision    (paper Eq. 4)
 REWARD_COLLISION       = -1000   # penalty on collision             (paper Eq. 4)
-MAX_EPOCHS             = 5000    # total training episodes          (paper §3.4)
-MAX_STEPS_PER_EPISODE  = 1800    # env steps before episode timeout
+MAX_EPOCHS             = 10000    # total training episodes          (paper §3.4)
+MAX_STEPS_PER_EPISODE  = 2500    # env steps before episode timeout
 HIDDEN_UNITS           = 300     # neurons per hidden layer         (paper §3.4)
 COLLISION_TOL          = 0.2    # collision distance threshold, metres
 
 # ── Training-control parameters ────────────────────────────────────────────────
-PATIENCE               = 300000     # episodes without reward improvement → early stop
-BEST_MODEL_WINDOW      = 50      # moving-average window for smoothed reward metric
+PATIENCE               = 30000000     # episodes without reward improvement → early stop
+BEST_MODEL_WINDOW      = 500      # moving-average window for smoothed reward metric
 MEMORY_SIZE            = 100000  # experience replay buffer capacity
 
 # ── Model selection ─────────────────────────────────────────────────────────────
@@ -82,8 +82,8 @@ TARGET_UPDATE_FREQ_CANDIDATES = [1000]   # target-net update period in env steps
 
 # Default hyperparameters (used when RUN_MODEL_SELECTION = False)
 GAMMA_DEFAULT              = 0.99
-LR_DEFAULT                 = 0.001
-BATCH_SIZE_DEFAULT         = 256
+LR_DEFAULT                 = 0.0005
+BATCH_SIZE_DEFAULT         = 512
 TARGET_UPDATE_FREQ_DEFAULT = 1000   # env steps between target-network updates
 
 # ══════════════════════════════════════════════════════════════════════════════

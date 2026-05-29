@@ -1,0 +1,54 @@
+<sdf version="1.6">
+  <world name="test_env">
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/gazebo</namespace>
+      </ros>
+    </plugin>
+    
+    <!-- Luce del sole -->
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <!-- Pavimento base -->
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <!-- Definizione diretta del tuo file .obj nel mondo -->
+    <model name="geometria_rampe_muri">
+      <pose>0 0 0 1.570796 0 0</pose>
+      <static>true</static>
+      <link name="link">
+        
+        <!-- Fisica e collisioni per il LiDAR -->
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <!-- Il comando file:// dice a Gazebo di cercare il .obj nella stessa cartella -->
+              <uri>model://oa_drl_control/worlds/training_env.obj</uri>
+            </mesh>
+          </geometry>
+        </collision>
+
+        <!-- Grafica visibile -->
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>model://oa_drl_control/worlds/training_env.obj</uri>
+            </mesh>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Grey</name>
+            </script>
+          </material>
+        </visual>
+        
+      </link>
+    </model>
+
+  </world>
+</sdf>
