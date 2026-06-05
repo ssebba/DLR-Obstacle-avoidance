@@ -163,7 +163,7 @@ def generate_launch_description():
 
     # 1. Avvia Gazebo, robot_state_publisher (in parallelo)
     ld.add_action(gzserver_cmd)
-    ld.add_action(gzclient_cmd)
+    #ld.add_action(gzclient_cmd)
     ld.add_action(robot_state_publisher_cmd)
 
     # 2a. Patcha l'SDF con il lidar_rate (deve avvenire prima dello spawn)

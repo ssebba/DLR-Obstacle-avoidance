@@ -39,7 +39,8 @@ def generate_launch_description():
     world = os.path.join(
         get_package_share_directory('oa_drl_control'),
         'worlds',
-        'test_env.world'
+        #'test_env.world'
+        'training_envOBSTACLE.world'
         #'world1.world'
     )
 

@@ -28,6 +28,7 @@ import json
 import itertools
 import random
 import csv
+import queue
 import sys
 import threading
 from collections import deque
@@ -56,17 +57,24 @@ LIDAR_MAX_RANGE        = 5.0     # sensor max range, metres
 LINEAR_VELOCITY        = 0.2     # constant forward speed, m/s
 EPSILON_INITIAL        = 1.0     # starting ε for ε-greedy exploration
 EPSILON_MIN            = 0.05    # minimum ε                       (paper §3.3)
-BETA                   = 0.9994   # ε decay rate per episode (paper §5.2 best)
-REWARD_SAFE            = 5       # reward per step w/o collision    (paper Eq. 4)
-REWARD_COLLISION       = -1000   # penalty on collision             (paper Eq. 4)
-MAX_EPOCHS             = 10000    # total training episodes          (paper §3.4)
-MAX_STEPS_PER_EPISODE  = 2500    # env steps before episode timeout
+BETA                   = 0.9996   # ε decay rate per episode (paper §5.2 best)
+REWARD_SAFE            = 5       # reward base per step w/o collision (paper Eq. 4)
+REWARD_COLLISION       = -1000   # penalty on collision              (paper Eq. 4)
+# ── Exponential proximity penalty (calibrated on training_env.obj geometry) ────
+# Corridors as narrow as 0.5m, median clearance 0.69m, 71% of space < 1.0m
+# Collision at 0.04 norm (0.2m real); center of narrowest corridor = 0.05 norm
+# Reward must stay POSITIVE at corridor center to not discourage navigation
+D_SAFE                 = 0.10    # normalised threshold (= 0.5m real); penalty grows below this
+PROX_K                 = 20.0    # exponential penalty intensity
+CLEAR_W                = 2.0     # linear clearance bonus weight
+MAX_EPOCHS             = 8000    # total training episodes          (paper §3.4)
+MAX_STEPS_PER_EPISODE  = 1800    # env steps before episode timeout
 HIDDEN_UNITS           = 300     # neurons per hidden layer         (paper §3.4)
 COLLISION_TOL          = 0.2    # collision distance threshold, metres
 
 # ── Training-control parameters ────────────────────────────────────────────────
-PATIENCE               = 30000000     # episodes without reward improvement → early stop
-BEST_MODEL_WINDOW      = 500      # moving-average window for smoothed reward metric
+PATIENCE               = 3000     # episodes without reward improvement → early stop
+BEST_MODEL_WINDOW      = 200       # moving-average window for smoothed reward metric
 MEMORY_SIZE            = 100000  # experience replay buffer capacity
 
 # ── Model selection ─────────────────────────────────────────────────────────────
@@ -82,8 +90,8 @@ TARGET_UPDATE_FREQ_CANDIDATES = [1000]   # target-net update period in env steps
 
 # Default hyperparameters (used when RUN_MODEL_SELECTION = False)
 GAMMA_DEFAULT              = 0.99
-LR_DEFAULT                 = 0.0005
-BATCH_SIZE_DEFAULT         = 512
+LR_DEFAULT                 = 0.001
+BATCH_SIZE_DEFAULT         = 256
 TARGET_UPDATE_FREQ_DEFAULT = 1000   # env steps between target-network updates
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -120,7 +128,10 @@ class Trainer(Node):
         self.step_count        = 0
         self.episode_reward    = 0.0
         self.episode_q_values  = []
-        self.is_training_active = False
+        self._train_queue = queue.Queue()
+        self._train_thread = threading.Thread(
+            target=self._training_worker, daemon=True)
+        self._train_thread.start()
 
         # ── Launch the appropriate phase ───────────────────────────────────────
         if RUN_MODEL_SELECTION:
@@ -211,6 +222,7 @@ class Trainer(Node):
         self.epsilon             = EPSILON_INITIAL
         self.epoch_count         = 1
         self.env_step_count      = 0
+        self._drain_train_queue()
         self.candidate_reward_history = deque(maxlen=BEST_MODEL_WINDOW)
 
         # Reset episode-level state (is_resetting is managed by reset_done_callback)
@@ -309,6 +321,7 @@ class Trainer(Node):
                 self.epoch_count = meta.get('epoch_count', 1)
                 self.epsilon     = meta.get('epsilon', EPSILON_INITIAL)
                 self.best_avg_reward = meta.get('best_avg_reward', -float('inf'))
+                self.patience_counter = meta.get('patience_counter', 0)
                 self.get_logger().info(
                     f'  Resumed: episode={self.epoch_count}, '
                     f'epsilon={self.epsilon:.3f}, best_reward={self.best_avg_reward:.2f}'
@@ -316,7 +329,8 @@ class Trainer(Node):
             else:
                 self.epoch_count = 1
                 self.epsilon     = EPSILON_INITIAL
-                self.best_avg_q  = -float('inf')
+                self.best_avg_reward = -float('inf')
+                self.patience_counter = 0
             mode = 'a'
         else:
             # ── Fresh start (after selection or first-ever run) ────────────────
@@ -326,11 +340,12 @@ class Trainer(Node):
             self.epoch_count  = 1
             self.epsilon      = EPSILON_INITIAL
             self.best_avg_reward = -float('inf')
+            self.patience_counter = 0
             mode = 'w'
 
         self.memory           = deque(maxlen=MEMORY_SIZE)
         self.env_step_count   = 0
-        self.patience_counter = 0
+        self._drain_train_queue()
         self.recent_avg_reward = deque(maxlen=BEST_MODEL_WINDOW)
         self.best_model_path  = Path.home() / 'ros_ws' / 'models' / 'best_model.keras'
 
@@ -458,7 +473,27 @@ class Trainer(Node):
 
         # ── 1. Collision check → reward ────────────────────────────────────────
         collision = self.check_collision(self.state) or self.stop_flag
-        reward    = REWARD_COLLISION if collision else REWARD_SAFE
+        if collision:
+            reward = REWARD_COLLISION
+        else:
+            # Exponential proximity penalty + linear clearance bonus
+            # Calibrated on training_env.obj: corridors 0.5–1.5m, median 0.69m
+            min_distance = float(np.min(self.state))  # normalised [0, 1]
+
+            # Base: survival reward
+            base_reward = REWARD_SAFE  # +5
+
+            # Exponential penalty: grows when min_dist < D_SAFE (0.5m real)
+            # Tuned so center of narrowest corridor (0.25m) still gets positive reward
+            if min_distance < D_SAFE:
+                proximity_penalty = -PROX_K * np.exp(-4.0 * min_distance / D_SAFE)
+            else:
+                proximity_penalty = 0.0
+
+            # Linear bonus: incentivises staying far from walls
+            clearance_bonus = CLEAR_W * min_distance
+
+            reward = base_reward + proximity_penalty + clearance_bonus
         self.episode_reward += reward
 
         # ── 2. Store transition (s_t, a_t, r_{t+1}, s_{t+1}) in D ─────────────
@@ -486,10 +521,9 @@ class Trainer(Node):
             self.reset_simulation()
             return
 
-        # ── 4. Asynchronous gradient step ──────────
-        if getattr(self, 'is_training_active', False) is False:
-            self.is_training_active = True
-            threading.Thread(target=self._async_train_model, daemon=True).start()
+        # ── 4. Env-step count & async training ──────────────────────────────
+        self.env_step_count += 1
+        self._train_queue.put_nowait(self.env_step_count)
 
         # ── 6. ε-greedy action selection ───────────────────────────────────────
         q_values = self.model(self.state, training=False).numpy()
@@ -511,21 +545,30 @@ class Trainer(Node):
         self.previous_action = m
         self.step_count     += 1
 
-    def _async_train_model(self):
-        """Run the training step and target network update asynchronously."""
-        try:
-            self.train_model()
-            self.env_step_count += 1
+    def _training_worker(self):
+        """Persistent background thread: pulls env-step signals and trains."""
+        while True:
+            try:
+                env_step = self._train_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self.train_model()
+                # ── 5. Update target network every N env steps ──
+                if env_step % self.target_update_freq == 0:
+                    self._update_target_model()
+                    self.get_logger().info(
+                        f'Target network updated (env step {env_step})')
+            except Exception as e:
+                self.get_logger().error(f'Error in training worker: {e}')
 
-            # ── 5. Update target network every N env steps ──
-            if self.env_step_count % self.target_update_freq == 0:
-                self._update_target_model()
-                self.get_logger().info(
-                    f'Target network updated (env step {self.env_step_count})')
-        except Exception as e:
-            self.get_logger().error(f'Error in async training: {e}')
-        finally:
-            self.is_training_active = False
+    def _drain_train_queue(self):
+        """Discard pending training signals (used on phase/candidate reset)."""
+        while not self._train_queue.empty():
+            try:
+                self._train_queue.get_nowait()
+            except queue.Empty:
+                break
 
     # ──────────────────────────────────────────────────────────────────────────
     # Episode-end logic
@@ -629,9 +672,10 @@ class Trainer(Node):
             self.model.save(ckpt_path)
             with open(meta_path, 'w') as f:
                 json.dump({
-                    'epoch_count':     self.epoch_count,
+                    'epoch_count':     self.epoch_count + 1,
                     'epsilon':         self.epsilon,
                     'best_avg_reward': self.best_avg_reward,
+                    'patience_counter': self.patience_counter,
                 }, f)
             self.get_logger().info(
                 f'Checkpoint saved — episode {self.epoch_count}, '
@@ -668,6 +712,7 @@ class Trainer(Node):
                 'epoch_count':     self.epoch_count,
                 'epsilon':         self.epsilon,
                 'best_avg_reward': self.best_avg_reward,
+                'patience_counter': self.patience_counter,
             }, f)
 
         self.get_logger().info(

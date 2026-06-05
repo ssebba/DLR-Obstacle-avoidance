@@ -32,7 +32,8 @@ setup(
             'filter_lidar = oa_drl_control.lidar_data_filter:main',
             'controller = oa_drl_control.controller:main',
             'trainer = oa_drl_control.trainer:main',
-            'respawner = oa_drl_control.respawner:main'
+            'respawner = oa_drl_control.respawner:main',
+            'mov_obs = oa_drl_control.random_obstacle:main'
         ],
     },
 )
