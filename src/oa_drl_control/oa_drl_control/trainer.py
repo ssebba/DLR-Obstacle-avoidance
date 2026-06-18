@@ -11,7 +11,6 @@ Enhancements over the baseline (see differences.md):
   - Synchronous training: one gradient step per env step (paper Algorithm 1)
   - Correct loss: L = (1/2n) * sum(y_i - Q_i)^2            (paper Eq. 5)
   - Target network updated every N *environment* steps      (paper Alg. 1 l.16)
-  - Model-selection phase to identify optimal hyperparameters
   - Best-model checkpoint: saved when smoothed avg-Q improves, not every N epochs
   - Early stopping with patience parameter
 """
@@ -25,7 +24,7 @@ import numpy as np
 import tensorflow as tf
 import os
 import json
-import itertools
+
 import random
 import csv
 import queue
@@ -50,16 +49,17 @@ if gpus:
 # ║           HYPERPARAMETERS — edit this section to configure training         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-# ── Fixed parameters (paper-specified: Feng et al., Robotics 2021) ─────────────
+# ── Fixed parameters (paper-specified) ─────────────
 ACTION_SIZE            = 11      # number of discrete angular-velocity actions
 NUM_LIDAR_RANGES       = 50      # pre-processed LIDAR readings  (input dim)
 LIDAR_MAX_RANGE        = 5.0     # sensor max range, metres
-LINEAR_VELOCITY        = 0.2     # constant forward speed, m/s
 EPSILON_INITIAL        = 1.0     # starting ε for ε-greedy exploration
-EPSILON_MIN            = 0.05    # minimum ε                       (paper §3.3)
-BETA                   = 0.9996   # ε decay rate per episode (paper §5.2 best)
-REWARD_SAFE            = 5       # reward base per step w/o collision (paper Eq. 4)
-REWARD_COLLISION       = -1000   # penalty on collision              (paper Eq. 4)
+EPSILON_MIN            = 0.05    # minimum ε                       
+REWARD_SAFE            = 5       # reward base per step w/o collision
+REWARD_COLLISION       = -1000   # penalty on collision
+HIDDEN_UNITS           = 300     # neurons per hidden layer
+
+# ── Fixed parameters (user defined) ─────────────
 # ── Exponential proximity penalty (calibrated on training_env.obj geometry) ────
 # Corridors as narrow as 0.5m, median clearance 0.69m, 71% of space < 1.0m
 # Collision at 0.04 norm (0.2m real); center of narrowest corridor = 0.05 norm
@@ -67,32 +67,21 @@ REWARD_COLLISION       = -1000   # penalty on collision              (paper Eq. 
 D_SAFE                 = 0.10    # normalised threshold (= 0.5m real); penalty grows below this
 PROX_K                 = 20.0    # exponential penalty intensity
 CLEAR_W                = 2.0     # linear clearance bonus weight
-MAX_EPOCHS             = 8000    # total training episodes          (paper §3.4)
+MAX_EPOCHS             = 8000    # total training episodes
 MAX_STEPS_PER_EPISODE  = 1800    # env steps before episode timeout
-HIDDEN_UNITS           = 300     # neurons per hidden layer         (paper §3.4)
 COLLISION_TOL          = 0.2    # collision distance threshold, metres
+LINEAR_VELOCITY        = 0.2     # constant forward speed, m/s
+BETA                   = 0.9996   # ε decay rate per episode
+GAMMA                  = 0.99
+LR                     = 0.001
+BATCH_SIZE             = 256
+TARGET_UPDATE_FREQ     = 1000   # env steps between target-network updates
 
 # ── Training-control parameters ────────────────────────────────────────────────
 PATIENCE               = 3000     # episodes without reward improvement → early stop
 BEST_MODEL_WINDOW      = 200       # moving-average window for smoothed reward metric
 MEMORY_SIZE            = 100000  # experience replay buffer capacity
 
-# ── Model selection ─────────────────────────────────────────────────────────────
-RUN_MODEL_SELECTION          = False  # False → skip and use defaults below
-SELECTION_EPOCHS             = 1000   # episodes per candidate (shorter trial run)
-
-# Search grids — add more values to expand the search space
-GAMMA_CANDIDATES              = [0.95, 0.97, 0.99]    # discount factor γ
-LR_CANDIDATES                 = [0.0005, 0.001] # Adam learning rate α
-BATCH_SIZE_CANDIDATES         = [256]    # mini-batch size   (e.g. [64, 128, 256])
-TARGET_UPDATE_FREQ_CANDIDATES = [1000]   # target-net update period in env steps
-                                         # (e.g. [500, 1000, 5000])
-
-# Default hyperparameters (used when RUN_MODEL_SELECTION = False)
-GAMMA_DEFAULT              = 0.99
-LR_DEFAULT                 = 0.001
-BATCH_SIZE_DEFAULT         = 256
-TARGET_UPDATE_FREQ_DEFAULT = 1000   # env steps between target-network updates
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -108,6 +97,7 @@ class Trainer(Node):
         super().__init__('trainer')
 
         # ── ROS2 I/O ──────────────────────────────────────────────────────────
+        # Defined publishers, subscribers and clients
         self.scan_subscription = self.create_subscription(
             Float32MultiArray, '/lidar_data', self.scan_callback, 1)
 
@@ -118,6 +108,7 @@ class Trainer(Node):
         self.unpause_physics_client = self.create_client(Empty,   '/unpause_physics')
 
         # ── Shared per-episode state ───────────────────────────────────────────
+        #initialize the flags and the state variables
         self.navigation_active = True
         self.stop_flag         = False
         self.state             = None
@@ -133,17 +124,14 @@ class Trainer(Node):
             target=self._training_worker, daemon=True)
         self._train_thread.start()
 
-        # ── Launch the appropriate phase ───────────────────────────────────────
-        if RUN_MODEL_SELECTION:
-            self._start_selection_phase()
-        else:
-            default_params = {
-                'gamma':              GAMMA_DEFAULT,
-                'lr':                 LR_DEFAULT,
-                'batch_size':         BATCH_SIZE_DEFAULT,
-                'target_update_freq': TARGET_UPDATE_FREQ_DEFAULT,
-            }
-            self._start_training_phase(default_params, force_fresh=False)
+        # ── Launch training ─────────────────────────────────────────────────────
+        params = {
+            'gamma':              GAMMA,
+            'lr':                 LR,
+            'batch_size':         BATCH_SIZE,
+            'target_update_freq': TARGET_UPDATE_FREQ,
+        }
+        self._start_training_phase(params, force_fresh=False)
 
         self.get_logger().info('Trainer node initialised.')
 
@@ -152,7 +140,7 @@ class Trainer(Node):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _build_model(self, lr: float) -> tf.keras.Model:
-        """Build the two-hidden-layer Q-network described in the paper (§3.4)."""
+        """Build the two-hidden-layer Q-network."""
         model = tf.keras.Sequential([
             tf.keras.layers.InputLayer(input_shape=(NUM_LIDAR_RANGES,)),
             tf.keras.layers.Dense(HIDDEN_UNITS, activation='relu'),
@@ -164,145 +152,15 @@ class Trainer(Node):
         return model
 
     def _update_target_model(self):
-        """Hard copy θ⁻ ← θ  (paper Algorithm 1, line 16)."""
+        """Hard copy θ⁻ ← θ"""
         self.target_model.set_weights(self.model.get_weights())
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Model-selection phase
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def _start_selection_phase(self):
-        """Build the full candidate list and kick off the first trial."""
-        self.phase = 'SELECTION'
-
-        # Cartesian product of all grid values
-        self.candidates = [
-            {'gamma': g, 'lr': lr, 'batch_size': bs, 'target_update_freq': tuf}
-            for g, lr, bs, tuf in itertools.product(
-                GAMMA_CANDIDATES, LR_CANDIDATES,
-                BATCH_SIZE_CANDIDATES, TARGET_UPDATE_FREQ_CANDIDATES)
-        ]
-        self.candidate_idx     = 0
-        self.selection_results = []
-
-        n = len(self.candidates)
-        self.get_logger().info(
-            f'\n{"=" * 60}\n'
-            f'  MODEL SELECTION PHASE\n'
-            f'  Candidates              : {n}\n'
-            f'  Episodes per candidate  : {SELECTION_EPOCHS}\n'
-            f'  Total selection episodes: {n * SELECTION_EPOCHS}\n'
-            f'{"=" * 60}'
-        )
-
-        # Open model-selection CSV log
-        sel_csv = Path.home() / 'ros_ws' / 'models' / 'model_selection_log.csv'
-        self.csv_file   = open(sel_csv, 'w', newline='')
-        self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow([
-            'Candidate', 'Gamma', 'LR', 'BatchSize', 'TargetUpdateFreq',
-            'Episode', 'Total_Reward', 'Avg_Q_Value', 'Steps'
-        ])
-
-        self._start_candidate(self.candidates[0])
-
-    def _start_candidate(self, params: dict):
-        """Reset all model/episode state for a new model-selection candidate."""
-        self.gamma              = params['gamma']
-        self.batch_size         = params['batch_size']
-        self.target_update_freq = params['target_update_freq']
-
-        # Build a fresh model pair for this candidate
-        self.model        = self._build_model(lr=params['lr'])
-        self.target_model = self._build_model(lr=params['lr'])
-        self._update_target_model()
-
-        # Fresh training-state
-        self.memory              = deque(maxlen=MEMORY_SIZE)
-        self.epsilon             = EPSILON_INITIAL
-        self.epoch_count         = 1
-        self.env_step_count      = 0
-        self._drain_train_queue()
-        self.candidate_reward_history = deque(maxlen=BEST_MODEL_WINDOW)
-
-        # Reset episode-level state (is_resetting is managed by reset_done_callback)
-        self.step_count      = 0
-        self.episode_reward  = 0.0
-        self.episode_q_values = []
-        self.previous_state  = None
-        self.previous_action = None
-        self.stop_flag       = False
-        self.state           = None
-
-        self.get_logger().info(
-            f'  ▶ Candidate {self.candidate_idx + 1}/{len(self.candidates)}: '
-            f'gamma={params["gamma"]}, lr={params["lr"]}, '
-            f'batch_size={params["batch_size"]}, '
-            f'target_update_freq={params["target_update_freq"]}'
-        )
-
-    def _finish_candidate(self):
-        """Score the current candidate and move to the next (or to training)."""
-        score = (float(np.mean(self.candidate_reward_history))
-                 if self.candidate_reward_history else -float('inf'))
-
-        params = self.candidates[self.candidate_idx]
-        self.selection_results.append({'params': params, 'score': score})
-
-        self.get_logger().info(
-            f'  ✓ Candidate {self.candidate_idx + 1}/{len(self.candidates)} done. '
-            f'Smoothed avg-reward score = {score:.2f}'
-        )
-
-        self.candidate_idx += 1
-        if self.candidate_idx < len(self.candidates):
-            self._start_candidate(self.candidates[self.candidate_idx])
-        else:
-            self._select_best_and_start_training()
-
-    def _select_best_and_start_training(self):
-        """Pick the winner, print the full results table, start full training."""
-        self.csv_file.close()
-
-        best    = max(self.selection_results, key=lambda r: r['score'])
-        best_p  = best['params']
-        best_sc = best['score']
-
-        # ── Print full results table ───────────────────────────────────────────
-        self.get_logger().info(f'\n{"=" * 60}\n  MODEL SELECTION RESULTS\n{"=" * 60}')
-        for i, r in enumerate(self.selection_results):
-            p   = r['params']
-            tag = '  ← BEST' if r is best else ''
-            self.get_logger().info(
-                f'  [{i + 1:2d}] gamma={p["gamma"]}, lr={p["lr"]}, '
-                f'batch={p["batch_size"]}, tuf={p["target_update_freq"]} '
-                f'→ score={r["score"]:.4f}{tag}'
-            )
-
-        # ── Print best hyperparameters ─────────────────────────────────────────
-        self.get_logger().info(
-            f'\n{"=" * 60}\n'
-            f'  BEST HYPERPARAMETERS\n'
-            f'  gamma              = {best_p["gamma"]}\n'
-            f'  learning_rate      = {best_p["lr"]}\n'
-            f'  batch_size         = {best_p["batch_size"]}\n'
-            f'  target_update_freq = {best_p["target_update_freq"]} env steps\n'
-            f'  beta  (fixed)      = {BETA}\n'
-            f'  epsilon_min (fixed)= {EPSILON_MIN}\n'
-            f'  Selection score    = {best_sc:.4f}\n'
-            f'  Starting full training for {MAX_EPOCHS} episodes...\n'
-            f'{"=" * 60}'
-        )
-
-        self._start_training_phase(best_p, force_fresh=True)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Full training phase
+    # Training phase
     # ──────────────────────────────────────────────────────────────────────────
 
     def _start_training_phase(self, params: dict, force_fresh: bool = False):
-        """Initialise (or resume) the full DDQN training phase."""
-        self.phase              = 'TRAINING'
+        """Initialise (or resume) the DDQN training phase."""
         self.gamma              = params['gamma']
         self.batch_size         = params['batch_size']
         self.target_update_freq = params['target_update_freq']
@@ -502,20 +360,15 @@ class Trainer(Node):
                 self.previous_state, self.previous_action,
                 reward, self.state, collision
             ))
-
+    
         # ── 3. Episode end: collision or timeout ───────────────────────────────
         if collision or self.step_count > MAX_STEPS_PER_EPISODE:
             self.stop_robot()
             self.pause_physics_client.call_async(Empty.Request())
             self.is_resetting = True
             reason = 'COLLISION' if collision else 'TIMEOUT'
-            if self.phase == 'SELECTION':
-                phase_ep = (f'Sel-candidate {self.candidate_idx + 1} '
-                            f'ep {self.epoch_count}/{SELECTION_EPOCHS}')
-            else:
-                phase_ep = f'Train ep {self.epoch_count}/{MAX_EPOCHS}'
             self.get_logger().error(
-                f'[{self.phase}] {phase_ep} — {reason}. '
+                f'Train ep {self.epoch_count}/{MAX_EPOCHS} — {reason}. '
                 f'Reward: {self.episode_reward:.0f}. Resetting...'
             )
             self.reset_simulation()
@@ -532,6 +385,7 @@ class Trainer(Node):
         m       = (random.randint(0, ACTION_SIZE - 1)
                    if random.random() < self.epsilon
                    else int(np.argmax(q_values[0])))
+
         omega_m = -0.8 + 0.16 * m   # angular velocity (paper §3.4)
 
         # ── 7. Publish velocity command ─────────────────────────────────────────
@@ -593,45 +447,11 @@ class Trainer(Node):
         future.add_done_callback(self.reset_done_callback)
 
     def _on_episode_end(self):
-        """Dispatch end-of-episode bookkeeping to the active phase handler."""
+        """End-of-episode bookkeeping: logging, best-model, patience."""
         avg_q = (float(np.mean(self.episode_q_values))
                  if self.episode_q_values else 0.0)
         self.episode_q_values = []
-
-        if self.phase == 'SELECTION':
-            self._on_selection_episode_end(avg_q)
-        else:
-            self._on_training_episode_end(avg_q)
-
-    # ── Selection phase handler ────────────────────────────────────────────────
-
-    def _on_selection_episode_end(self, avg_q: float):
-        """Log episode, update score buffer, decay ε; advance candidate if done."""
-        params = self.candidates[self.candidate_idx]
-
-        # CSV log for this episode
-        self.csv_writer.writerow([
-            self.candidate_idx + 1,
-            params['gamma'], params['lr'],
-            params['batch_size'], params['target_update_freq'],
-            self.epoch_count, self.episode_reward, avg_q, self.step_count
-        ])
-        self.csv_file.flush()
-
-        # Track episode reward for candidate scoring (last BEST_MODEL_WINDOW episodes)
-        self.candidate_reward_history.append(self.episode_reward)
-
-        # Decay ε (paper Eq. 3: ε_{k+1} = β * ε_k)
-        if self.epsilon > EPSILON_MIN:
-            self.epsilon *= BETA
-
-        self.epoch_count += 1
-
-        # Check whether this candidate's trial has ended
-        if self.epoch_count > SELECTION_EPOCHS:
-            self._finish_candidate()   # may call _start_candidate or _start_training
-
-    # ── Training phase handler ─────────────────────────────────────────────────
+        self._on_training_episode_end(avg_q)
 
     def _on_training_episode_end(self, avg_q: float):
         """Log episode, track best model, check patience and termination."""

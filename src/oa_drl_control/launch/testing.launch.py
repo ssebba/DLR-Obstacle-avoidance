@@ -32,16 +32,18 @@ def generate_launch_description():
     pkg_gazebo_ros = get_package_share_directory('gazebo_ros')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
-    x_pose = LaunchConfiguration('x_pose', default='-5.0')
-    y_pose = LaunchConfiguration('y_pose', default='3.5')
+    #x_pose = LaunchConfiguration('x_pose', default='-5.0')
+    #y_pose = LaunchConfiguration('y_pose', default='3.5')
+    x_pose = LaunchConfiguration('x_pose', default='0.0')
+    y_pose = LaunchConfiguration('y_pose', default='0.0')
     lidar_rate = LaunchConfiguration('lidar_rate', default='33')
 
     world = os.path.join(
         get_package_share_directory('oa_drl_control'),
         'worlds',
-        #'test_env.world'
-        'training_envOBSTACLE.world'
-        #'world1.world'
+        'test_env.world'
+        #'training_envOBSTACLE.world'
+        #'world5.world'
     )
 
     gzserver_cmd = IncludeLaunchDescription(
